@@ -31,85 +31,194 @@ HTML_TEMPLATE = '''
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Комментарии</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             background: #f5f5f5;
-            padding: 16px;
             min-height: 100vh;
+            padding-bottom: 20px;
         }
-        .container { max-width: 600px; margin: 0 auto; }
-        .comment-form {
+
+        /* Фиксированная форма внизу */
+        .comment-form-fixed {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
             background: white;
-            border-radius: 16px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            border-top: 1px solid #e0e0e0;
+            padding: 12px 16px;
+            box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+            z-index: 100;
         }
-        .form-group { margin-bottom: 16px; }
-        .form-group label {
-            display: block;
-            font-size: 14px;
-            font-weight: 500;
-            color: #666;
-            margin-bottom: 8px;
+
+        .form-row {
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
         }
-        .form-group input, .form-group textarea {
+
+        .input-group {
+            flex: 1;
+        }
+
+        .input-group input {
             width: 100%;
-            padding: 12px;
+            padding: 12px 14px;
             border: 1px solid #e0e0e0;
-            border-radius: 12px;
+            border-radius: 24px;
             font-size: 15px;
-            font-family: inherit;
+            background: #f8f9fa;
+            transition: all 0.2s;
         }
-        .form-group input:focus, .form-group textarea:focus {
+
+        .input-group input:focus {
             outline: none;
             border-color: #667eea;
+            background: white;
         }
-        .form-group textarea { resize: vertical; min-height: 80px; }
-        .char-count { text-align: right; font-size: 12px; color: #999; margin-top: 4px; }
-        button {
+
+        .input-group textarea {
             width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 12px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: opacity 0.2s;
+            padding: 12px 14px;
+            border: 1px solid #e0e0e0;
+            border-radius: 24px;
+            font-size: 15px;
+            font-family: inherit;
+            resize: none;
+            background: #f8f9fa;
+            transition: all 0.2s;
+            min-height: 44px;
+            max-height: 100px;
         }
-        button:hover { opacity: 0.9; }
-        button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .input-group textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            background: white;
+        }
+
+        .send-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            width: 44px;
+            height: 44px;
+            border-radius: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: transform 0.1s, opacity 0.2s;
+            flex-shrink: 0;
+        }
+
+        .send-btn:active {
+            transform: scale(0.95);
+        }
+
+        .send-btn.disabled {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        .send-btn svg {
+            width: 22px;
+            height: 22px;
+            fill: white;
+        }
+
+        /* Основной контент */
+        .content {
+            padding: 16px 16px 100px 16px;
+        }
+
+        /* Заголовок поста */
+        .post-header {
+            background: white;
+            border-radius: 20px;
+            padding: 16px;
+            margin-bottom: 16px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        }
+
+        .post-title {
+            font-weight: 600;
+            font-size: 16px;
+            color: #333;
+            margin-bottom: 8px;
+        }
+
+        .post-id {
+            font-size: 11px;
+            color: #999;
+            word-break: break-all;
+            background: #f5f5f5;
+            padding: 6px 10px;
+            border-radius: 12px;
+            display: inline-block;
+        }
+
+        /* Счетчик комментариев */
         .comments-header {
             display: flex;
             justify-content: space-between;
-            align-items: center;
+            align-items: baseline;
             margin-bottom: 16px;
+            padding: 0 4px;
         }
-        .comments-count { font-size: 14px; color: #666; font-weight: 500; }
-        .comments-list { display: flex; flex-direction: column; gap: 12px; }
+
+        .comments-count {
+            font-size: 15px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .refresh-btn {
+            background: none;
+            border: none;
+            color: #667eea;
+            font-size: 13px;
+            padding: 6px 12px;
+            cursor: pointer;
+            border-radius: 20px;
+            transition: background 0.2s;
+        }
+
+        .refresh-btn:active {
+            background: #f0f0f0;
+        }
+
+        /* Список комментариев */
+        .comments-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
         .comment-card {
             background: white;
-            border-radius: 16px;
-            padding: 16px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-            animation: fadeIn 0.3s ease;
+            border-radius: 20px;
+            padding: 14px 16px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+            transition: all 0.2s;
         }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
+
         .comment-header {
             display: flex;
             align-items: center;
             gap: 12px;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
         }
+
         .comment-avatar {
             width: 40px;
             height: 40px;
@@ -123,102 +232,209 @@ HTML_TEMPLATE = '''
             font-size: 16px;
             flex-shrink: 0;
         }
-        .comment-info { flex: 1; }
-        .comment-author { font-weight: 600; color: #333; font-size: 15px; }
-        .comment-time { font-size: 11px; color: #999; margin-top: 2px; }
-        .comment-text {
-            color: #555;
-            font-size: 14px;
-            line-height: 1.5;
-            margin-bottom: 10px;
-            word-break: break-word;
-            padding-left: 52px;
+
+        .comment-info {
+            flex: 1;
         }
-        .comment-actions { padding-left: 52px; }
-        .comment-actions span {
-            font-size: 12px;
-            color: #888;
-            cursor: pointer;
-            transition: color 0.2s;
+
+        .comment-author {
+            font-weight: 600;
+            color: #333;
+            font-size: 15px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
         }
-        .comment-actions span:hover { color: #667eea; }
-        .empty-state { text-align: center; padding: 48px 20px; color: #999; }
-        .empty-state-icon { font-size: 48px; margin-bottom: 12px; }
-        .status {
-            margin-top: 16px;
-            padding: 12px;
-            border-radius: 12px;
-            text-align: center;
-            font-size: 13px;
-            display: none;
-        }
-        .status.success { background: #d4edda; color: #155724; display: block; }
-        .status.error { background: #f8d7da; color: #721c24; display: block; }
-        .loading { text-align: center; padding: 40px; color: #999; }
-        .info-bar {
-            font-size: 12px;
-            color: #888;
-            text-align: center;
-            margin-top: 16px;
-            padding: 8px;
+
+        .comment-badge {
+            font-size: 11px;
             background: #e8f0fe;
-            border-radius: 8px;
-            word-break: break-all;
-        }
-        .refresh-btn {
-            background: none;
             color: #667eea;
-            font-size: 12px;
-            padding: 4px 12px;
-            width: auto;
-            cursor: pointer;
-            border: 1px solid #e0e0e0;
-            border-radius: 20px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-weight: normal;
         }
-        .refresh-btn:hover { background: #f0f0f0; }
+
+        .comment-time {
+            font-size: 11px;
+            color: #999;
+            margin-top: 2px;
+        }
+
+        .comment-text {
+            color: #444;
+            font-size: 14px;
+            line-height: 1.45;
+            margin: 8px 0 8px 52px;
+            word-break: break-word;
+        }
+
+        .comment-actions {
+            margin-left: 52px;
+            display: flex;
+            gap: 12px;
+        }
+
+        .comment-actions button {
+            background: none;
+            border: none;
+            font-size: 12px;
+            color: #999;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 16px;
+            transition: all 0.2s;
+        }
+
+        .comment-actions button:active {
+            background: #f0f0f0;
+        }
+
+        .comment-actions .delete-btn {
+            color: #e74c3c;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .empty-state-text {
+            font-size: 14px;
+        }
+
+        .status-message {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 40px;
+            font-size: 13px;
+            z-index: 200;
+            white-space: nowrap;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .status-message.show {
+            opacity: 1;
+        }
+
+        .status-message.success {
+            background: #2ecc71;
+        }
+
+        .status-message.error {
+            background: #e74c3c;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .comment-card {
+            animation: fadeIn 0.2s ease;
+        }
+
+        /* Адаптация под маленькие экраны */
+        @media (max-width: 480px) {
+            .form-row {
+                gap: 8px;
+            }
+            .input-group input, .input-group textarea {
+                font-size: 14px;
+                padding: 10px 14px;
+            }
+            .send-btn {
+                width: 40px;
+                height: 40px;
+            }
+            .comment-text {
+                margin-left: 44px;
+            }
+            .comment-actions {
+                margin-left: 44px;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="comment-form">
-            <div class="form-group">
-                <label>👤 Ваше имя</label>
-                <input type="text" id="usernameInput" placeholder="Как вас называть?" maxlength="50">
-            </div>
-            <div class="form-group">
-                <label>💬 Комментарий</label>
-                <textarea id="commentInput" placeholder="Напишите ваш комментарий..." maxlength="500"></textarea>
-                <div class="char-count"><span id="charCount">0</span>/500</div>
-            </div>
-            <button id="submitBtn" onclick="submitComment()">📤 Отправить комментарий</button>
-            <div id="status" class="status"></div>
+    <div class="content">
+        <!-- Информация о посте -->
+        <div class="post-header" id="postHeader">
+            <div class="post-title">💬 Комментарии</div>
+            <div class="post-id" id="postIdDisplay"></div>
         </div>
 
+        <!-- Заголовок списка -->
         <div class="comments-header">
             <span class="comments-count" id="commentsCount">Комментарии (0)</span>
             <button class="refresh-btn" onclick="loadComments()">🔄 Обновить</button>
         </div>
+
+        <!-- Список комментариев -->
         <div id="commentsList" class="comments-list">
             <div class="loading">Загрузка комментариев...</div>
         </div>
-        <div class="info-bar" id="postIdInfo"></div>
     </div>
 
+    <!-- Фиксированная форма внизу -->
+    <div class="comment-form-fixed">
+        <div class="form-row">
+            <div class="input-group">
+                <input type="text" id="usernameInput" placeholder="Ваше имя" maxlength="50">
+            </div>
+            <div class="input-group">
+                <textarea id="commentInput" placeholder="Написать комментарий..." rows="1" maxlength="500"></textarea>
+            </div>
+            <button class="send-btn" id="submitBtn" onclick="submitComment()">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <div id="statusMessage" class="status-message"></div>
+
     <script>
-        // ⭐ КЛЮЧЕВОЙ МОМЕНТ: получаем post_id из URL
+        // ⭐ Получаем post_id из URL
         const urlParams = new URLSearchParams(window.location.search);
         let postId = urlParams.get('startapp') || urlParams.get('post_id');
         
         // Если post_id нет — показываем ошибку
         if (!postId) {
+            document.getElementById('postIdDisplay').innerHTML = '❌ Ошибка: не удалось определить пост';
             document.getElementById('commentsList').innerHTML = `
                 <div class="empty-state">
                     <div class="empty-state-icon">⚠️</div>
-                    <div>Ошибка: не удалось определить пост</div>
-                    <div style="font-size: 13px; margin-top: 8px;">Перейдите по ссылке из канала MAX</div>
+                    <div class="empty-state-text">Не удалось определить пост</div>
+                    <div style="font-size: 12px; margin-top: 8px;">Перейдите по ссылке из канала MAX</div>
                 </div>
             `;
-            document.getElementById('submitBtn').disabled = true;
+            document.getElementById('submitBtn').classList.add('disabled');
+            document.getElementById('usernameInput').disabled = true;
+            document.getElementById('commentInput').disabled = true;
+        } else {
+            document.getElementById('postIdDisplay').innerHTML = `📌 ${postId.length > 40 ? postId.substring(0, 40) + '...' : postId}`;
         }
         
         // ID текущего пользователя
@@ -231,30 +447,32 @@ HTML_TEMPLATE = '''
         // Имя пользователя
         let currentUsername = localStorage.getItem('comment_username') || '';
         
-        // Отображаем ID поста
-        if (postId) {
-            document.getElementById('postIdInfo').innerHTML = `📌 Пост: ${postId.substring(0, 40)}${postId.length > 40 ? '...' : ''}`;
-        }
-        
-        // Заполняем имя, если сохранено
         if (currentUsername) {
             document.getElementById('usernameInput').value = currentUsername;
         }
         
         // Сохраняем имя при вводе
         document.getElementById('usernameInput').addEventListener('input', function() {
-            currentUsername = this.value;
+            currentUsername = this.value.trim();
             localStorage.setItem('comment_username', currentUsername);
         });
         
-        // Счетчик символов
+        // Автоматическое расширение textarea
         const commentInput = document.getElementById('commentInput');
-        const charCountSpan = document.getElementById('charCount');
         commentInput.addEventListener('input', function() {
-            charCountSpan.textContent = this.value.length;
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 100) + 'px';
         });
         
-        // Загрузка комментариев для КОНКРЕТНОГО поста
+        // Отправка по Enter (Ctrl+Enter или просто Enter)
+        commentInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitComment();
+            }
+        });
+        
+        // Загрузка комментариев
         async function loadComments() {
             if (!postId) return;
             
@@ -270,8 +488,8 @@ HTML_TEMPLATE = '''
                     commentsList.innerHTML = `
                         <div class="empty-state">
                             <div class="empty-state-icon">💬</div>
-                            <div>Пока нет комментариев</div>
-                            <div style="font-size: 13px; margin-top: 8px;">Будьте первым!</div>
+                            <div class="empty-state-text">Пока нет комментариев</div>
+                            <div style="font-size: 12px; margin-top: 8px;">Будьте первым!</div>
                         </div>
                     `;
                 }
@@ -282,7 +500,6 @@ HTML_TEMPLATE = '''
             }
         }
         
-        // Добавление комментария в DOM
         function addCommentToDOM(comment) {
             const commentsList = document.getElementById('commentsList');
             const time = new Date(comment.created_at).toLocaleString('ru-RU');
@@ -296,17 +513,23 @@ HTML_TEMPLATE = '''
                 <div class="comment-header">
                     <div class="comment-avatar">${escapeHtml(avatarLetter)}</div>
                     <div class="comment-info">
-                        <div class="comment-author">${escapeHtml(comment.username)} ${isCurrentUser ? '(Вы)' : ''}</div>
+                        <div class="comment-author">
+                            ${escapeHtml(comment.username)}
+                            ${isCurrentUser ? '<span class="comment-badge">Вы</span>' : ''}
+                        </div>
                         <div class="comment-time">${time}</div>
                     </div>
                 </div>
                 <div class="comment-text">${escapeHtml(comment.comment)}</div>
-                ${isCurrentUser ? `<div class="comment-actions"><span onclick="deleteComment(${comment.id})">🗑 Удалить</span></div>` : ''}
+                ${isCurrentUser ? `
+                    <div class="comment-actions">
+                        <button class="delete-btn" onclick="deleteComment(${comment.id})">🗑 Удалить</button>
+                    </div>
+                ` : ''}
             `;
             commentsList.insertBefore(commentDiv, commentsList.firstChild);
         }
         
-        // Отправка комментария
         async function submitComment() {
             if (!postId) {
                 showStatus('❌ Ошибка: пост не найден', 'error');
@@ -328,8 +551,7 @@ HTML_TEMPLATE = '''
             }
             
             const button = document.getElementById('submitBtn');
-            button.disabled = true;
-            button.textContent = '⏳ Отправка...';
+            button.classList.add('disabled');
             
             try {
                 const response = await fetch('/api/comment', {
@@ -346,15 +568,13 @@ HTML_TEMPLATE = '''
                 if (response.ok) {
                     showStatus('✅ Комментарий отправлен!', 'success');
                     commentInput.value = '';
-                    charCountSpan.textContent = '0';
-                    // Обновляем список комментариев
+                    commentInput.style.height = 'auto';
                     await loadComments();
-                    // Закрываем мини-приложение через 2 секунды
                     setTimeout(() => {
                         if (window.Maxi && window.Maxi.close) {
                             window.Maxi.close();
                         }
-                    }, 1500);
+                    }, 1000);
                 } else {
                     const data = await response.json();
                     showStatus(data.error || '❌ Ошибка отправки', 'error');
@@ -363,12 +583,10 @@ HTML_TEMPLATE = '''
                 console.error('Ошибка:', error);
                 showStatus('❌ Ошибка соединения', 'error');
             } finally {
-                button.disabled = false;
-                button.textContent = '📤 Отправить комментарий';
+                button.classList.remove('disabled');
             }
         }
         
-        // Удаление комментария
         async function deleteComment(commentId) {
             if (!confirm('Удалить комментарий?')) return;
             
@@ -380,19 +598,21 @@ HTML_TEMPLATE = '''
                 });
                 if (response.ok) {
                     loadComments();
+                    showStatus('🗑 Комментарий удален', 'success');
                 }
             } catch (error) {
                 console.error('Ошибка удаления:', error);
+                showStatus('❌ Ошибка удаления', 'error');
             }
         }
         
         function showStatus(message, type) {
-            const statusDiv = document.getElementById('status');
+            const statusDiv = document.getElementById('statusMessage');
             statusDiv.textContent = message;
-            statusDiv.className = `status ${type}`;
+            statusDiv.className = `status-message ${type} show`;
             setTimeout(() => {
-                statusDiv.className = 'status';
-            }, 3000);
+                statusDiv.classList.remove('show');
+            }, 2000);
         }
         
         function escapeHtml(text) {
