@@ -205,13 +205,20 @@ HTML_TEMPLATE = '''
     </div>
 
     <script>
-        // Получаем ID поста из URL
+        // ⭐ КЛЮЧЕВОЙ МОМЕНТ: получаем post_id из URL
         const urlParams = new URLSearchParams(window.location.search);
         let postId = urlParams.get('startapp') || urlParams.get('post_id');
         
-        // Если нет post_id, используем общий ключ (для тестирования)
+        // Если post_id нет — показываем ошибку
         if (!postId) {
-            postId = 'general';
+            document.getElementById('commentsList').innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">⚠️</div>
+                    <div>Ошибка: не удалось определить пост</div>
+                    <div style="font-size: 13px; margin-top: 8px;">Перейдите по ссылке из канала MAX</div>
+                </div>
+            `;
+            document.getElementById('submitBtn').disabled = true;
         }
         
         // ID текущего пользователя
@@ -225,7 +232,9 @@ HTML_TEMPLATE = '''
         let currentUsername = localStorage.getItem('comment_username') || '';
         
         // Отображаем ID поста
-        document.getElementById('postIdInfo').innerHTML = `📌 Пост: ${postId.substring(0, 40)}${postId.length > 40 ? '...' : ''}`;
+        if (postId) {
+            document.getElementById('postIdInfo').innerHTML = `📌 Пост: ${postId.substring(0, 40)}${postId.length > 40 ? '...' : ''}`;
+        }
         
         // Заполняем имя, если сохранено
         if (currentUsername) {
@@ -245,8 +254,10 @@ HTML_TEMPLATE = '''
             charCountSpan.textContent = this.value.length;
         });
         
-        // Загрузка комментариев для конкретного поста
+        // Загрузка комментариев для КОНКРЕТНОГО поста
         async function loadComments() {
+            if (!postId) return;
+            
             try {
                 const response = await fetch(`/api/comments/${encodeURIComponent(postId)}`);
                 const data = await response.json();
@@ -297,6 +308,11 @@ HTML_TEMPLATE = '''
         
         // Отправка комментария
         async function submitComment() {
+            if (!postId) {
+                showStatus('❌ Ошибка: пост не найден', 'error');
+                return;
+            }
+            
             const username = currentUsername.trim();
             const comment = commentInput.value.trim();
             
@@ -340,7 +356,8 @@ HTML_TEMPLATE = '''
                         }
                     }, 1500);
                 } else {
-                    showStatus('❌ Ошибка отправки', 'error');
+                    const data = await response.json();
+                    showStatus(data.error || '❌ Ошибка отправки', 'error');
                 }
             } catch (error) {
                 console.error('Ошибка:', error);
@@ -385,7 +402,9 @@ HTML_TEMPLATE = '''
         }
         
         // Загружаем комментарии при старте
-        loadComments();
+        if (postId) {
+            loadComments();
+        }
     </script>
 </body>
 </html>
