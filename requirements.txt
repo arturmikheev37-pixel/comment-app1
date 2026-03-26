@@ -1,12 +1,2 @@
-maxbot
-fastapi
-uvicorn
-pydantic
-flask
-flask-socketio
-flask-cors
-eventlet
-python-socketio
-simple-websocket
 flask
 gunicorn
