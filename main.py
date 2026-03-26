@@ -13,7 +13,6 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS comments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             username TEXT NOT NULL,
             comment TEXT NOT NULL,
@@ -26,7 +25,7 @@ def init_db():
 
 init_db()
 
-# Простой и красивый HTML без сложной анимации
+# Максимально простой HTML
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="ru">
@@ -42,10 +41,10 @@ HTML_TEMPLATE = '''
         }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            background: #ffffff;
-            padding: 16px;
-            padding-bottom: 100px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+            min-height: 100vh;
         }
         
         .container {
@@ -53,66 +52,76 @@ HTML_TEMPLATE = '''
             margin: 0 auto;
         }
         
-        /* Информация о посте */
-        .post-info {
-            background: #f8f9fa;
-            padding: 12px 16px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            font-size: 12px;
-            color: #666;
-            word-break: break-all;
-            border: 1px solid #e9ecef;
+        /* Заголовок */
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 24px 20px;
+            border-radius: 20px;
+            text-align: center;
+            margin-bottom: 24px;
         }
         
-        /* Форма добавления комментария */
-        .comment-form {
+        .header h1 {
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+        
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        
+        /* Форма добавления */
+        .form-card {
             background: white;
-            border: 1px solid #e9ecef;
-            border-radius: 16px;
-            padding: 16px;
+            border-radius: 20px;
+            padding: 20px;
             margin-bottom: 24px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
         }
         
         .form-group {
-            margin-bottom: 12px;
+            margin-bottom: 15px;
         }
         
         .form-group input {
             width: 100%;
-            padding: 12px 14px;
-            border: 1px solid #dee2e6;
+            padding: 14px;
+            border: 1px solid #e0e0e0;
             border-radius: 12px;
             font-size: 15px;
-            background: white;
+            background: #fafafa;
         }
         
         .form-group input:focus {
             outline: none;
             border-color: #667eea;
+            background: white;
         }
         
         .form-group textarea {
             width: 100%;
-            padding: 12px 14px;
-            border: 1px solid #dee2e6;
+            padding: 14px;
+            border: 1px solid #e0e0e0;
             border-radius: 12px;
             font-size: 15px;
             font-family: inherit;
             resize: vertical;
-            min-height: 80px;
+            min-height: 100px;
+            background: #fafafa;
         }
         
         .form-group textarea:focus {
             outline: none;
             border-color: #667eea;
+            background: white;
         }
         
         button {
             width: 100%;
-            padding: 12px;
-            background: #667eea;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             border: none;
             border-radius: 12px;
@@ -122,8 +131,8 @@ HTML_TEMPLATE = '''
             transition: opacity 0.2s;
         }
         
-        button:active {
-            opacity: 0.8;
+        button:hover {
+            opacity: 0.9;
         }
         
         button:disabled {
@@ -131,7 +140,7 @@ HTML_TEMPLATE = '''
             cursor: not-allowed;
         }
         
-        /* Заголовок списка комментариев */
+        /* Заголовок списка */
         .comments-header {
             display: flex;
             justify-content: space-between;
@@ -141,19 +150,20 @@ HTML_TEMPLATE = '''
         }
         
         .comments-count {
-            font-size: 15px;
+            font-size: 16px;
             font-weight: 600;
             color: #333;
         }
         
         .refresh-btn {
-            background: none;
+            background: #f0f0f0;
             border: none;
             color: #667eea;
             font-size: 13px;
-            padding: 6px 12px;
+            padding: 6px 16px;
             cursor: pointer;
             border-radius: 20px;
+            width: auto;
         }
         
         /* Список комментариев */
@@ -164,30 +174,31 @@ HTML_TEMPLATE = '''
         }
         
         .comment-card {
-            background: #f8f9fa;
+            background: white;
             border-radius: 16px;
-            padding: 14px;
-            border: 1px solid #e9ecef;
+            padding: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            border: 1px solid #f0f0f0;
         }
         
         .comment-header {
             display: flex;
             align-items: center;
-            gap: 10px;
-            margin-bottom: 8px;
+            gap: 12px;
+            margin-bottom: 10px;
         }
         
         .comment-avatar {
-            width: 36px;
-            height: 36px;
-            background: #667eea;
+            width: 44px;
+            height: 44px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
             font-weight: 600;
-            font-size: 14px;
+            font-size: 18px;
             flex-shrink: 0;
         }
         
@@ -198,56 +209,60 @@ HTML_TEMPLATE = '''
         .comment-name {
             font-weight: 600;
             color: #333;
-            font-size: 14px;
+            font-size: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
         }
         
         .comment-badge {
             font-size: 10px;
             background: #e8f0fe;
             color: #667eea;
-            padding: 2px 8px;
-            border-radius: 12px;
-            margin-left: 6px;
+            padding: 2px 10px;
+            border-radius: 20px;
             font-weight: normal;
         }
         
         .comment-time {
-            font-size: 10px;
+            font-size: 11px;
             color: #999;
-            margin-top: 2px;
+            margin-top: 4px;
         }
         
         .comment-text {
             color: #444;
             font-size: 14px;
-            line-height: 1.4;
-            margin-top: 6px;
-            margin-left: 46px;
+            line-height: 1.5;
+            margin-top: 8px;
+            padding-left: 56px;
             word-break: break-word;
         }
         
         .delete-btn {
             background: none;
             border: none;
-            font-size: 11px;
+            font-size: 12px;
             color: #e74c3c;
             cursor: pointer;
-            margin-left: 46px;
-            margin-top: 6px;
-            padding: 4px 8px;
+            margin-top: 8px;
+            margin-left: 56px;
+            padding: 4px 0;
+            width: auto;
         }
         
         .empty-state {
             text-align: center;
-            padding: 40px;
+            padding: 60px 20px;
             color: #999;
-            background: #f8f9fa;
+            background: white;
             border-radius: 16px;
         }
         
         .empty-state-icon {
-            font-size: 48px;
-            margin-bottom: 12px;
+            font-size: 64px;
+            margin-bottom: 16px;
         }
         
         .loading {
@@ -258,7 +273,7 @@ HTML_TEMPLATE = '''
         
         .status {
             margin-top: 12px;
-            padding: 10px;
+            padding: 12px;
             border-radius: 12px;
             text-align: center;
             font-size: 13px;
@@ -276,54 +291,45 @@ HTML_TEMPLATE = '''
             color: #721c24;
             display: block;
         }
+        
+        .char-count {
+            text-align: right;
+            font-size: 12px;
+            color: #999;
+            margin-top: 5px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <!-- Информация о посте -->
-        <div class="post-info" id="postInfo">
-            Загрузка информации о посте...
+        <div class="header">
+            <h1>💬 Комментарии</h1>
+            <p>Оставьте свой отзыв или мнение</p>
         </div>
         
-        <!-- Форма добавления комментария -->
-        <div class="comment-form">
+        <div class="form-card">
             <div class="form-group">
                 <input type="text" id="username" placeholder="Ваше имя" maxlength="50">
             </div>
             <div class="form-group">
-                <textarea id="comment" placeholder="Написать комментарий..." rows="3" maxlength="500"></textarea>
+                <textarea id="comment" placeholder="Напишите комментарий..." maxlength="500"></textarea>
+                <div class="char-count"><span id="charCount">0</span>/500</div>
             </div>
-            <button id="submitBtn" onclick="sendComment()">📤 Отправить</button>
+            <button id="submitBtn" onclick="sendComment()">📤 Отправить комментарий</button>
             <div id="status" class="status"></div>
         </div>
         
-        <!-- Заголовок списка -->
         <div class="comments-header">
             <span class="comments-count" id="commentsCount">Комментарии (0)</span>
             <button class="refresh-btn" onclick="loadComments()">🔄 Обновить</button>
         </div>
         
-        <!-- Список комментариев -->
         <div id="commentsList" class="comments-list">
             <div class="loading">Загрузка комментариев...</div>
         </div>
     </div>
 
     <script>
-        // Получаем post_id из URL
-        const urlParams = new URLSearchParams(window.location.search);
-        let postId = urlParams.get('startapp') || urlParams.get('post_id');
-        
-        // Показываем информацию о посте
-        if (postId) {
-            document.getElementById('postInfo').innerHTML = `📌 Пост: ${postId.length > 50 ? postId.substring(0, 50) + '...' : postId}`;
-        } else {
-            document.getElementById('postInfo').innerHTML = `⚠️ Ошибка: не удалось определить пост. Перейдите по ссылке из канала MAX.`;
-            document.getElementById('submitBtn').disabled = true;
-            document.getElementById('username').disabled = true;
-            document.getElementById('comment').disabled = true;
-        }
-        
         // ID пользователя
         let userId = localStorage.getItem('comment_user_id');
         if (!userId) {
@@ -343,12 +349,25 @@ HTML_TEMPLATE = '''
             localStorage.setItem('comment_username', userName);
         });
         
+        // Счетчик символов
+        const commentInput = document.getElementById('comment');
+        const charCountSpan = document.getElementById('charCount');
+        commentInput.addEventListener('input', function() {
+            charCountSpan.textContent = this.value.length;
+        });
+        
+        // Отправка по Enter (Ctrl+Enter)
+        commentInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                sendComment();
+            }
+        });
+        
         // Загрузка комментариев
         async function loadComments() {
-            if (!postId) return;
-            
             try {
-                const response = await fetch(`/api/comments/${encodeURIComponent(postId)}`);
+                const response = await fetch('/api/comments');
                 const data = await response.json();
                 const container = document.getElementById('commentsList');
                 
@@ -360,7 +379,7 @@ HTML_TEMPLATE = '''
                         <div class="empty-state">
                             <div class="empty-state-icon">💬</div>
                             <div>Пока нет комментариев</div>
-                            <div style="font-size: 12px; margin-top: 8px;">Будьте первым!</div>
+                            <div style="font-size: 13px; margin-top: 8px;">Напишите первый комментарий!</div>
                         </div>
                     `;
                 }
@@ -383,8 +402,8 @@ HTML_TEMPLATE = '''
                 <div class="comment-header">
                     <div class="comment-avatar">${escapeHtml(letter)}</div>
                     <div class="comment-info">
-                        <div>
-                            <span class="comment-name">${escapeHtml(comment.username)}</span>
+                        <div class="comment-name">
+                            ${escapeHtml(comment.username)}
                             ${isMine ? '<span class="comment-badge">Вы</span>' : ''}
                         </div>
                         <div class="comment-time">${time}</div>
@@ -401,17 +420,13 @@ HTML_TEMPLATE = '''
             const commentText = document.getElementById('comment').value.trim();
             
             if (!username) {
-                showStatus('Введите ваше имя', 'error');
+                showStatus('❌ Введите ваше имя', 'error');
                 document.getElementById('username').focus();
                 return;
             }
             if (!commentText) {
-                showStatus('Введите комментарий', 'error');
+                showStatus('❌ Введите комментарий', 'error');
                 document.getElementById('comment').focus();
-                return;
-            }
-            if (!postId) {
-                showStatus('Ошибка: пост не найден', 'error');
                 return;
             }
             
@@ -424,7 +439,6 @@ HTML_TEMPLATE = '''
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        post_id: postId,
                         user_id: userId,
                         username: username,
                         comment: commentText
@@ -434,19 +448,21 @@ HTML_TEMPLATE = '''
                 if (response.ok) {
                     showStatus('✅ Комментарий отправлен!', 'success');
                     document.getElementById('comment').value = '';
+                    charCountSpan.textContent = '0';
                     await loadComments();
                     setTimeout(() => {
                         if (window.Maxi && window.Maxi.close) window.Maxi.close();
                     }, 1500);
                 } else {
                     const data = await response.json();
-                    showStatus(data.error || 'Ошибка отправки', 'error');
+                    showStatus(data.error || '❌ Ошибка отправки', 'error');
                 }
             } catch (error) {
-                showStatus('Ошибка соединения', 'error');
+                console.error('Ошибка:', error);
+                showStatus('❌ Ошибка соединения', 'error');
             } finally {
                 btn.disabled = false;
-                btn.textContent = '📤 Отправить';
+                btn.textContent = '📤 Отправить комментарий';
             }
         }
         
@@ -461,10 +477,10 @@ HTML_TEMPLATE = '''
                 });
                 if (response.ok) {
                     loadComments();
-                    showStatus('Комментарий удален', 'success');
+                    showStatus('🗑 Комментарий удален', 'success');
                 }
             } catch (error) {
-                showStatus('Ошибка удаления', 'error');
+                showStatus('❌ Ошибка удаления', 'error');
             }
         }
         
@@ -484,9 +500,7 @@ HTML_TEMPLATE = '''
         }
         
         // Запуск
-        if (postId) {
-            loadComments();
-        }
+        loadComments();
     </script>
 </body>
 </html>
@@ -496,16 +510,11 @@ HTML_TEMPLATE = '''
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-@app.route('/api/comments/<post_id>')
-def get_comments(post_id):
+@app.route('/api/comments')
+def get_comments():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT id, user_id, username, comment, created_at 
-        FROM comments 
-        WHERE post_id = ? 
-        ORDER BY created_at DESC
-    ''', (post_id,))
+    cursor.execute('SELECT id, user_id, username, comment, created_at FROM comments ORDER BY created_at DESC')
     rows = cursor.fetchall()
     conn.close()
     comments = [{
@@ -521,20 +530,19 @@ def get_comments(post_id):
 def add_comment():
     try:
         data = request.get_json()
-        post_id = data.get('post_id')
         user_id = data.get('user_id')
         username = data.get('username')
         comment = data.get('comment')
         
-        if not all([post_id, user_id, username, comment]):
+        if not all([user_id, username, comment]):
             return jsonify({'error': 'Missing fields'}), 400
         
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO comments (post_id, user_id, username, comment, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (post_id, user_id, username, comment, datetime.now().isoformat()))
+            INSERT INTO comments (user_id, username, comment, created_at)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, username, comment, datetime.now().isoformat()))
         conn.commit()
         conn.close()
         
