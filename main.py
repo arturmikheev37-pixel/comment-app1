@@ -3,28 +3,26 @@ import sqlite3
 from datetime import datetime
 
 app = Flask(__name__)
-DB_PATH = "comments.db"
-
+DB = "db.db"
 
 # ---------------- DB ----------------
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
 
     c.execute("""
-        CREATE TABLE IF NOT EXISTS comments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id TEXT,
-            user_id TEXT,
-            username TEXT,
-            comment TEXT,
-            created_at TEXT
-        )
+    CREATE TABLE IF NOT EXISTS comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_id TEXT,
+        user_id TEXT,
+        username TEXT,
+        comment TEXT,
+        created_at TEXT
+    )
     """)
 
     conn.commit()
     conn.close()
-
 
 init_db()
 
@@ -40,117 +38,128 @@ HTML = """
 
 <style>
 
-/* ---------- BACKGROUND ---------- */
 body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, Arial;
-
-    background:
-        radial-gradient(circle at 20% 20%, rgba(255,255,255,0.4) 2px, transparent 2px),
-        radial-gradient(circle at 80% 40%, rgba(255,255,255,0.3) 2px, transparent 2px),
-        radial-gradient(circle at 40% 80%, rgba(255,255,255,0.2) 2px, transparent 2px),
-        linear-gradient(135deg, #dfe9f3, #ffffff);
+    margin:0;
+    font-family:-apple-system, Arial;
+    background:#e5e5ea;
 }
 
-/* ---------- LAYOUT ---------- */
+/* HEADER */
+.header {
+    background:#1c1c1e;
+    color:white;
+    padding:14px;
+    text-align:center;
+    font-weight:600;
+    position:relative;
+}
+
+.header .left {
+    position:absolute;
+    left:10px;
+    top:12px;
+    font-size:20px;
+}
+
+.header .right {
+    position:absolute;
+    right:10px;
+    top:12px;
+}
+
+/* POST */
+.post {
+    background:white;
+    padding:10px;
+    display:flex;
+    align-items:center;
+}
+
+.avatar {
+    width:40px;
+    height:40px;
+    border-radius:50%;
+    background:#4e6cff;
+    margin-right:10px;
+}
+
+.msg .avatar {
+    width:32px;
+    height:32px;
+}
+
+.post-title {
+    font-weight:600;
+}
+
+.post-count {
+    font-size:12px;
+    color:gray;
+}
+
+/* CHAT */
 .chat {
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
+    height:calc(100vh - 140px);
+    overflow-y:auto;
+    padding:10px;
 }
 
-.messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 10px;
-}
-
-/* ---------- MESSAGE ---------- */
+/* MESSAGE */
 .msg {
-    max-width: 80%;
-    padding: 8px 12px;
-    border-radius: 16px;
-    margin-bottom: 8px;
-    position: relative;
-    word-wrap: break-word;
-    font-size: 14px;
+    display:flex;
+    margin-bottom:10px;
 }
 
-/* чужие */
-.other {
-    background: white;
-    align-self: flex-start;
-    border-bottom-left-radius: 4px;
+.bubble {
+    background:white;
+    padding:8px 12px;
+    border-radius:14px;
+    margin-left:8px;
+    max-width:75%;
 }
 
-/* мои */
-.me {
-    background: #dcf8c6;
-    align-self: flex-end;
-    border-bottom-right-radius: 4px;
-}
-
-/* имя */
 .name {
-    font-size: 12px;
-    font-weight: 600;
-    color: #555;
-    margin-bottom: 2px;
+    font-size:12px;
+    color:#555;
 }
 
-/* текст */
 .text {
-    display: inline-block;
+    font-size:14px;
 }
 
-/* время */
 .time {
-    font-size: 10px;
-    color: #777;
-    margin-left: 6px;
+    font-size:11px;
+    color:#888;
 }
 
-/* ---------- INPUT ---------- */
+.reply {
+    font-size:12px;
+    color:#4e6cff;
+    cursor:pointer;
+}
+
+/* INPUT */
 .input {
-    display: flex;
-    padding: 8px;
-    background: #f7f7f7;
-    border-top: 1px solid #ddd;
+    position:fixed;
+    bottom:0;
+    width:100%;
+    background:#f2f2f2;
+    display:flex;
+    align-items:center;
+    padding:8px;
 }
 
 .input input {
-    flex: 1;
-    padding: 10px 14px;
-    border-radius: 20px;
-    border: none;
-    outline: none;
-    background: white;
-    font-size: 14px;
+    flex:1;
+    border:none;
+    border-radius:20px;
+    padding:10px;
+    margin:0 8px;
 }
 
-/* кнопка */
-.input button {
-    margin-left: 8px;
-    border: none;
-    border-radius: 50%;
-    width: 40px;
-    height: 40px;
-    background: #4caf50;
-    color: white;
-    font-size: 16px;
-    cursor: pointer;
-}
-
-/* ---------- MOBILE FIX ---------- */
-@media (max-width: 600px) {
-    .msg {
-        max-width: 90%;
-        font-size: 15px;
-    }
-
-    .input input {
-        font-size: 16px;
-    }
+.icon {
+    font-size:20px;
+    cursor:pointer;
 }
 
 </style>
@@ -158,18 +167,32 @@ body {
 
 <body>
 
-<div class="chat">
-    <div id="list" class="messages"></div>
+<div class="header">
+    <div class="left">✕</div>
+    Комментарии (<span id="count">0</span>)
+    <div class="right">⋯</div>
+</div>
 
-    <div class="input">
-        <input id="text" placeholder="Сообщение..." />
-        <button onclick="send()">➤</button>
+<div class="post">
+    <div class="avatar"></div>
+    <div>
+        <div class="post-title">Мой пост</div>
+        <div class="post-count" id="postCount">0 комментариев</div>
     </div>
+</div>
+
+<div id="chat" class="chat"></div>
+
+<div class="input">
+    <div class="icon">📎</div>
+    <input id="text" placeholder="Написать комментарий..." />
+    <div class="icon" onclick="send()">➤</div>
+    <div class="icon">😊</div>
 </div>
 
 <script>
 
-// ---------- USER ----------
+// USER (MAX fallback)
 let user = {id:null,name:"User"};
 
 try {
@@ -180,43 +203,52 @@ try {
         if (u) {
             user.id = u.id;
             user.name = (u.first_name || "") + " " + (u.last_name || "");
-        } else throw "no user";
-    } else throw "no max";
-} catch {
+        }
+    }
+} catch {}
+
+if (!user.id) {
     user.id = localStorage.getItem("uid") || Date.now();
     user.name = "User_" + user.id;
     localStorage.setItem("uid", user.id);
 }
 
-// ---------- POST ----------
+// POST
 const post_id = new URLSearchParams(location.search).get("post") || "post_1";
 
-// ---------- LOAD ----------
+// LOAD
 async function load() {
     const res = await fetch(`/api/comments/${post_id}`);
     const data = await res.json();
 
-    const list = document.getElementById("list");
-    list.innerHTML = "";
+    const chat = document.getElementById("chat");
+    chat.innerHTML = "";
+
+    document.getElementById("count").innerText = data.comments.length;
+    document.getElementById("postCount").innerText = data.comments.length + " комментариев";
 
     data.comments.forEach(c => {
-        const div = document.createElement("div");const me = c.user_id == user.id;
+        const div = document.createElement("div");
+        div.className = "msg";
 
-        div.className = "msg " + (me ? "me" : "other");
-
-        div.innerHTML = `
-            ${!me ? `<div class="name">${c.username}</div>` : ""}
-            <span class="text">${c.comment}</span>
-            <span class="time">${new Date(c.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>
+        div.innerHTML = `<div class="avatar"></div>
+            <div class="bubble">
+                <div class="name">${c.username}</div>
+                <div class="text">${c.comment}</div>
+                <div class="time">
+                    ${new Date(c.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+                    <span class="reply">↩</span>
+                </div>
+            </div>
         `;
 
-        list.appendChild(div);
+        chat.appendChild(div);
     });
 
-    list.scrollTop = list.scrollHeight;
+    chat.scrollTop = chat.scrollHeight;
 }
 
-// ---------- SEND ----------
+// SEND
 async function send() {
     const input = document.getElementById("text");
     const text = input.value.trim();
@@ -238,16 +270,16 @@ async function send() {
         load();
 
     } catch(e) {
-        alert("Ошибка отправки");
+        alert("Ошибка");
     }
 }
 
-// ---------- ENTER ----------
+// ENTER
 document.getElementById("text").addEventListener("keypress", e=>{
     if(e.key==="Enter") send();
 });
 
-// ---------- AUTO ----------
+// AUTOLOAD
 setInterval(load,2000);
 load();
 
@@ -257,14 +289,14 @@ load();
 </html>
 """
 
-# ---------------- API ----------------
-@app.route('/')
+# ---------------- ROUTES ----------------
+@app.route("/")
 def index():
     return render_template_string(HTML)
 
-@app.route('/api/comments/<post_id>')
+@app.route("/api/comments/<post_id>")
 def get_comments(post_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
 
     c.execute("SELECT id,user_id,username,comment,created_at FROM comments WHERE post_id=? ORDER BY id", (post_id,))
@@ -276,11 +308,11 @@ def get_comments(post_id):
         for r in rows
     ]})
 
-@app.route('/api/comment', methods=['POST'])
-def add():
+@app.route("/api/comment", methods=["POST"])
+def add_comment():
     d = request.get_json()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
 
     c.execute(
