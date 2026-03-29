@@ -38,8 +38,8 @@ HTML = """
 <style>
 body {
     margin: 0;
-    background: #0f0f0f;
-    font-family: Arial;
+    background: #f5f7fb;
+    font-family: -apple-system, BlinkMacSystemFont, Arial;
 }
 
 .chat-container {
@@ -48,6 +48,7 @@ body {
     height: 100vh;
 }
 
+/* сообщения */
 .messages {
     flex: 1;
     overflow-y: auto;
@@ -57,16 +58,15 @@ body {
 /* сообщение */
 .message {
     max-width: 75%;
-    padding: 10px 14px;
+    padding: 12px 16px;
     border-radius: 18px;
     margin-bottom: 10px;
-    word-break: break-word;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.05);
 }
 
 /* чужие */
 .message.other {
-    background: #2a2a2a;
-    color: white;
+    background: white;
     align-self: flex-start;
 }
 
@@ -79,31 +79,39 @@ body {
 
 /* имя */
 .name {
-    font-size: 12px;
-    opacity: 0.7;
+    font-size: 13px;
+    font-weight: 600;
     margin-bottom: 4px;
 }
 
 /* время */
 .time {
+    font-size: 11px;
+    opacity: 0.6;
+    margin-top: 6px;
+}
+
+/* удалить */
+.delete {
     font-size: 10px;
-    opacity: 0.5;
-    margin-top: 5px;
+    margin-top: 4px;
+    cursor: pointer;
+    opacity: 0.6;
 }
 
 /* input */
 .input-bar {
     display: flex;
     padding: 10px;
-    background: #1a1a1a;
+    background: white;
+    border-top: 1px solid #eee;
 }
 
 .input-bar input {
     flex: 1;
     padding: 12px;
     border-radius: 20px;
-    border: none;
-    outline: none;
+    border: 1px solid #ddd;
 }
 
 .input-bar button {
@@ -121,14 +129,12 @@ body {
 <body>
 
 <div class="chat-container">
-
     <div id="commentsList" class="messages"></div>
 
     <div class="input-bar">
         <input id="commentInput" placeholder="Написать комментарий..." />
         <button onclick="sendComment()">➤</button>
     </div>
-
 </div>
 
 <script>
@@ -138,11 +144,22 @@ let user = {
     name: "User"
 };
 
-// 🔥 если есть MAX — используем его
-if (window.MAX && MAX.user) {
-    user.id = MAX.user.id;
-    user.name = MAX.user.first_name;
-} else {
+try {
+    if (window.MAX && MAX.WebApp) {
+        MAX.WebApp.ready();
+
+        const u = MAX.WebApp.initDataUnsafe.user;
+
+        if (u) {
+            user.id = u.id;
+            user.name = (u.first_name || "") + " " + (u.last_name || "");
+        } else {
+            throw "no user";
+        }
+    } else {
+        throw "no max";
+    }
+} catch (e) {
     // fallback
     user.id = localStorage.getItem("user_id") || Date.now();
     user.name = "User_" + user.id;
@@ -173,7 +190,7 @@ async function loadComments() {
             ${!isMe ? `<div class="name">${c.username}</div>` : ""}
             <div>${c.comment}</div>
             <div class="time">${new Date(c.created_at).toLocaleString()}</div>
-            ${isMe ? `<div onclick="deleteComment(${c.id})" style="font-size:10px;cursor:pointer;">Удалить</div>` : ""}
+            ${isMe ? `<div class="delete" onclick="deleteComment(${c.id})">Удалить</div>` : ""}
         `;
 
         list.appendChild(div);
@@ -183,8 +200,7 @@ async function loadComments() {
 }
 
 
-// ---------------- SEND ----------------
-async function sendComment() {
+// ---------------- SEND ----------------async function sendComment() {
     const input = document.getElementById("commentInput");
     const text = input.value.trim();
 
@@ -196,7 +212,8 @@ async function sendComment() {
         body: JSON.stringify({
             post_id,
             user_id: user.id,
-            username: user.name,comment: text
+            username: user.name,
+            comment: text
         })
     });
 
