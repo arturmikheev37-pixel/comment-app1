@@ -5,7 +5,7 @@ from datetime import datetime
 app = Flask(__name__)
 DB_PATH = "comments.db"
 
-# ------------------ INIT DB ------------------
+# ---------------- DB ----------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -26,8 +26,7 @@ def init_db():
 
 init_db()
 
-
-# ------------------ HTML ------------------
+# ---------------- HTML ----------------
 HTML = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -38,88 +37,71 @@ HTML = """
 <style>
 body {
     margin: 0;
-    background: #f5f7fb;
-    font-family: -apple-system, BlinkMacSystemFont, Arial;
+    background: #f4f6fb;
+    font-family: -apple-system, Arial;
 }
 
-.chat-container {
+.chat {
     display: flex;
     flex-direction: column;
     height: 100vh;
 }
 
-/* сообщения */
 .messages {
     flex: 1;
     overflow-y: auto;
-    padding: 15px;
+    padding: 12px;
 }
 
-/* сообщение */
-.message {
+.msg {
     max-width: 75%;
-    padding: 12px 16px;
-    border-radius: 18px;
+    padding: 10px 14px;
+    border-radius: 16px;
     margin-bottom: 10px;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+    font-size: 14px;
 }
 
-/* чужие */
-.message.other {
-    background: white;
-    align-self: flex-start;
+.other {
+    background: #fff;
 }
 
-/* мои */
-.message.me {
-    background: #667eea;
+.me {
+    background: #4e6cff;
     color: white;
-    align-self: flex-end;
+    margin-left: auto;
 }
 
-/* имя */
 .name {
-    font-size: 13px;
-    font-weight: 600;
-    margin-bottom: 4px;
+    font-size: 12px;
+    font-weight: bold;
+    margin-bottom: 3px;
 }
 
-/* время */
 .time {
-    font-size: 11px;
-    opacity: 0.6;
-    margin-top: 6px;
-}
-
-/* удалить */
-.delete {
     font-size: 10px;
-    margin-top: 4px;
-    cursor: pointer;
     opacity: 0.6;
 }
 
-/* input */
-.input-bar {
+.input {
     display: flex;
     padding: 10px;
     background: white;
-    border-top: 1px solid #eee;
+    border-top: 1px solid #ddd;
 }
 
-.input-bar input {
+.input input {
     flex: 1;
-    padding: 12px;
+    padding: 10px;
     border-radius: 20px;
-    border: 1px solid #ddd;
+    border: 1px solid #ccc;
 }
 
-.input-bar button {
+.input button {
     margin-left: 10px;
-    padding: 0 16px;
-    border-radius: 20px;
     border: none;
-    background: #667eea;
+    border-radius: 20px;
+    padding: 0 15px;
+    background: #4e6cff;
     color: white;
     cursor: pointer;
 }
@@ -128,207 +110,164 @@ body {
 
 <body>
 
-<div class="chat-container">
-    <div id="commentsList" class="messages"></div>
+<div class="chat">
+    <div id="list" class="messages"></div>
 
-    <div class="input-bar">
-        <input id="commentInput" placeholder="Написать комментарий..." />
-        <button onclick="sendComment()">➤</button>
+    <div class="input">
+        <input id="text" placeholder="Написать комментарий..." />
+        <button id="sendBtn">➤</button>
     </div>
 </div>
 
 <script>
-// ---------------- USER (MAX) ----------------
-let user = {
-    id: null,
-    name: "User"
-};
+
+// -------- USER (MAX) --------
+let user = {id: null, name: "User"};
 
 try {
     if (window.MAX && MAX.WebApp) {
         MAX.WebApp.ready();
-
         const u = MAX.WebApp.initDataUnsafe.user;
 
         if (u) {
             user.id = u.id;
             user.name = (u.first_name || "") + " " + (u.last_name || "");
-        } else {
-            throw "no user";
-        }
-    } else {
-        throw "no max";
-    }
-} catch (e) {
-    // fallback
-    user.id = localStorage.getItem("user_id") || Date.now();
+        } else throw "no user";
+    } else throw "no max";
+
+} catch {
+    user.id = localStorage.getItem("uid") || Date.now();
     user.name = "User_" + user.id;
-    localStorage.setItem("user_id", user.id);
+    localStorage.setItem("uid", user.id);
 }
 
+// -------- POST --------
+const post_id = new URLSearchParams(location.search).get("post") || "post_1";
 
-// ---------------- POST ID ----------------
-const post_id = new URLSearchParams(window.location.search).get("post") || "post_1";
+// -------- LOAD --------
+async function load() {
+    try {
+        const res = await fetch(`/api/comments/${post_id}`);
+        const data = await res.json();
 
+        const list = document.getElementById("list");
+        list.innerHTML = "";
 
-// ---------------- LOAD ----------------
-async function loadComments() {
-    const res = await fetch(`/api/comments/${post_id}`);
-    const data = await res.json();
+        data.comments.forEach(c => {
+            const div = document.createElement("div");
 
-    const list = document.getElementById("commentsList");
-    list.innerHTML = "";
+            const me = c.user_id == user.id;
+            div.className = "msg " + (me ? "me" : "other");
 
-    data.comments.forEach(c => {
-        const div = document.createElement("div");
+            div.innerHTML = `
+                ${!me ? `<div class="name">${c.username}</div>` : ""}
+                <div>${c.comment}</div>
+                <div class="time">${new Date(c.created_at).toLocaleTimeString()}</div>
+            `;
 
-        const isMe = c.user_id == user.id;
+            list.appendChild(div);
+        });
 
-        div.className = "message " + (isMe ? "me" : "other");
+        list.scrollTop = list.scrollHeight;
 
-        div.innerHTML = `
-            ${!isMe ? `<div class="name">${c.username}</div>` : ""}
-            <div>${c.comment}</div>
-            <div class="time">${new Date(c.created_at).toLocaleString()}</div>
-            ${isMe ? `<div class="delete" onclick="deleteComment(${c.id})">Удалить</div>` : ""}
-        `;
-
-        list.appendChild(div);
-    });
-
-    list.scrollTop = list.scrollHeight;
+    } catch (e) {
+        console.log("LOAD ERROR", e);
+    }
 }
 
+// -------- SEND --------
+async function send() {
+    const input = document.getElementById("text");
+    const btn = document.getElementById("sendBtn");
 
-// ---------------- SEND ----------------async function sendComment() {
-    const input = document.getElementById("commentInput");
     const text = input.value.trim();
-
     if (!text) return;
 
-    await fetch('/api/comment', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            post_id,
-            user_id: user.id,
-            username: user.name,
-            comment: text
-        })
-    });
+    btn.disabled = true;
 
-    input.value = "";
-    loadComments();
-}
+    try {
+        const res = await fetch("/api/comment", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                post_id,
+                user_id: user.id,
+                username: user.name,
+                comment: text})
+        });
 
+        const data = await res.json();
 
-// ---------------- DELETE ----------------
-async function deleteComment(id) {
-    await fetch('/api/comment/' + id, {
-        method: 'DELETE',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ user_id: user.id })
-    });
+        if (data.error) {
+            alert(data.error);
+        } else {
+            input.value = "";
+            load();
+        }
 
-    loadComments();
-}
-
-
-// ---------------- AUTO UPDATE ----------------
-setInterval(loadComments, 2000);
-loadComments();
-
-
-// ENTER SEND
-document.getElementById("commentInput").addEventListener("keypress", function(e) {
-    if (e.key === "Enter") {
-        sendComment();
+    } catch (e) {
+        alert("Ошибка отправки");
+        console.log(e);
     }
+
+    btn.disabled = false;
+}
+
+// -------- EVENTS --------
+document.getElementById("sendBtn").onclick = send;
+
+document.getElementById("text").addEventListener("keypress", e => {
+    if (e.key === "Enter") send();
 });
+
+// -------- AUTO --------
+setInterval(load, 2000);
+load();
+
 </script>
 
 </body>
 </html>
 """
 
-
-# ------------------ ROUTES ------------------
+# ---------------- ROUTES ----------------
 @app.route('/')
 def index():
     return render_template_string(HTML)
 
-
 @app.route('/api/comments/<post_id>')
-def get_comments(post_id):
+def comments(post_id):
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute('''
-        SELECT id, user_id, username, comment, created_at
-        FROM comments
-        WHERE post_id = ?
-        ORDER BY id ASC
-    ''', (post_id,))
-
-    rows = cursor.fetchall()
+    cur.execute("SELECT id, user_id, username, comment, created_at FROM comments WHERE post_id=? ORDER BY id", (post_id,))
+    rows = cur.fetchall()
     conn.close()
 
-    comments = [{
-        'id': r[0],
-        'user_id': r[1],
-        'username': r[2],
-        'comment': r[3],
-        'created_at': r[4]
-    } for r in rows]
-
-    return jsonify({'comments': comments})
-
+    return jsonify({
+        "comments": [
+            {"id":r[0],"user_id":r[1],"username":r[2],"comment":r[3],"created_at":r[4]}
+            for r in rows
+        ]
+    })
 
 @app.route('/api/comment', methods=['POST'])
-def add_comment():
-    data = request.get_json()
-
-    post_id = data.get('post_id')
-    user_id = data.get('user_id')
-    username = data.get('username')
-    comment = data.get('comment')
-
-    if not all([post_id, user_id, username, comment]):
-        return jsonify({'error': 'Missing fields'}), 400
-
-    if len(comment) > 500:
-        return jsonify({'error': 'Too long'}), 400
+def add():
+    d = request.get_json()
 
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute('''
-        INSERT INTO comments (post_id, user_id, username, comment, created_at)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (post_id, user_id, username, comment, datetime.now().isoformat()))
+    cur.execute(
+        "INSERT INTO comments (post_id,user_id,username,comment,created_at) VALUES (?,?,?,?,?)",
+        (d["post_id"], d["user_id"], d["username"], d["comment"], datetime.now().isoformat())
+    )
 
     conn.commit()
     conn.close()
 
-    return jsonify({'status': 'success'})
+    return jsonify({"ok": True})
 
-
-@app.route('/api/comment/<int:comment_id>', methods=['DELETE'])
-def delete_comment(comment_id):
-    data = request.get_json()
-    user_id = data.get('user_id')
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    cursor.execute('DELETE FROM comments WHERE id = ? AND user_id = ?', (comment_id, user_id))
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({'status': 'success'})
-
-
-# ------------------ RUN ------------------
-if __name__ == '__main__':
-    app.run(debug=True, port=8000)
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    app.run(debug=True)
