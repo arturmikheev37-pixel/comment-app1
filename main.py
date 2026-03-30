@@ -2,13 +2,10 @@ from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 from datetime import datetime
 import os
-import base64
-import hashlib
+import json
 
 app = Flask(__name__)
 DB_PATH = "comments.db"
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ---------------- Инициализация базы ----------------
 def init_db():
@@ -60,7 +57,6 @@ HTML = """
             flex-direction: column;
         }
         
-        /* Шапка */
         .chat-header {
             background: #1e1e22;
             padding: 14px 16px;
@@ -94,7 +90,6 @@ HTML = """
             border-radius: 20px;
         }
         
-        /* Область сообщений */
         .messages-area {
             flex: 1;
             overflow-y: auto;
@@ -104,7 +99,6 @@ HTML = """
             gap: 8px;
         }
         
-        /* Сообщение */
         .message {
             display: flex;
             gap: 10px;
@@ -167,7 +161,6 @@ HTML = """
             margin: 4px 0;
         }
         
-        /* Медиа */
         .message-media {
             margin-top: 6px;
             max-width: 250px;
@@ -182,7 +175,6 @@ HTML = """
             cursor: pointer;
         }
         
-        /* Действия */
         .message-actions {
             display: flex;
             gap: 12px;
@@ -210,7 +202,6 @@ HTML = """
             color: #0a84ff;
         }
         
-        /* Ответы */
         .replies-container {
             margin-left: 46px;
             margin-top: 8px;
@@ -226,14 +217,12 @@ HTML = """
             display: inline-block;
         }
         
-        /* Пустое состояние */
         .empty-state {
             text-align: center;
             padding: 60px 20px;
             color: #8e8e93;
         }
         
-        /* Форма внизу */
         .input-bar {
             background: #1e1e22;
             border-top: 1px solid #2a2a2e;
@@ -262,16 +251,6 @@ HTML = """
             display: flex;
             align-items: flex-end;
             gap: 8px;
-        }
-        
-        .input-wrapper input {
-            flex: 1;
-            background: none;
-            border: none;
-            color: #e4e6eb;
-            font-size: 15px;
-            padding: 4px 0;
-            outline: none;
         }
         
         .input-wrapper textarea {
@@ -354,7 +333,6 @@ HTML = """
             color: #8e8e93;
         }
         
-        /* Скрытый инпут для файлов */
         #fileInput {
             display: none;
         }
@@ -395,19 +373,51 @@ HTML = """
         let postId = urlParams.get('startapp') || urlParams.get('post') || 'general';
         document.getElementById('postIdDisplay').innerHTML = postId.length > 30 ? postId.substring(0, 30)+'...' : postId;
         
-        // Данные пользователя
-        let userId = localStorage.getItem('comment_user_id');
-        if (!userId) {
-            userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
-            localStorage.setItem('comment_user_id', userId);
+        // ⭐ ПОЛУЧАЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ ИЗ MAX ⭐
+        let userId = null;
+        let userName = null;
+        
+        // Пытаемся получить данные из MAX WebApp
+        try {
+            if (window.Maxi && window.Maxi.getUser) {
+                window.Maxi.getUser(function(user) {
+                    if (user && user.id) {
+                        userId = user.id.toString();
+                        userName = user.first_name + (user.last_name ? ' ' + user.last_name : '');
+                        localStorage.setItem('comment_user_id', userId);
+                        localStorage.setItem('comment_username', userName);
+                    } else {
+                        useLocalStorage();
+                    }
+                });
+            } else {
+                useLocalStorage();
+            }
+        } catch(e) {
+            console.log('MAX API не доступен, используем localStorage');
+            useLocalStorage();
         }
         
-        let userName = localStorage.getItem('comment_username') || '';
-        if (!userName) {
-            userName = prompt('Введите ваше имя:', 'Гость');
-            if (!userName) userName = 'Гость';
-            localStorage.setItem('comment_username', userName);
+        function useLocalStorage() {
+            userId = localStorage.getItem('comment_user_id');
+            if (!userId) {
+                userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
+                localStorage.setItem('comment_user_id', userId);
+            }
+            
+            userName = localStorage.getItem('comment_username');
+            if (!userName) {
+                userName = 'Гость_' + userId.substr(-4);
+                localStorage.setItem('comment_username', userName);
+            }
         }
+        
+        // Если данные ещё не загружены, ждём 1 секунду и используем localStorage
+        setTimeout(function() {
+            if (!userId || !userName) {
+                useLocalStorage();
+            }
+        }, 1000);
         
         // Переменные для ответа
         let replyToId = null;
@@ -517,7 +527,15 @@ HTML = """
             const avatarColor = comment.avatar_color || getAvatarColor(comment.username);
             const letter = (comment.username.charAt(0) || '?').toUpperCase();
             const isMine = comment.user_id === userId;
-            const isLiked = comment.liked_by ? JSON.parse(comment.liked_by).includes(userId) : false;
+            
+            // Безопасный парсинг liked_by
+            let likedBy = [];
+            try {
+                likedBy = typeof comment.liked_by === 'string' ? JSON.parse(comment.liked_by) : (comment.liked_by || []);
+            } catch(e) {
+                likedBy = [];
+            }
+            const isLiked = likedBy.includes(userId);
             
             const div = document.createElement('div');
             div.className = 'message';
@@ -554,7 +572,14 @@ HTML = """
             const avatarColor = reply.avatar_color || getAvatarColor(reply.username);
             const letter = (reply.username.charAt(0) || '?').toUpperCase();
             const isMine = reply.user_id === userId;
-            const isLiked = reply.liked_by ? JSON.parse(reply.liked_by).includes(userId) : false;
+            
+            let likedBy = [];
+            try {
+                likedBy = typeof reply.liked_by === 'string' ? JSON.parse(reply.liked_by) : (reply.liked_by || []);
+            } catch(e) {
+                likedBy = [];
+            }
+            const isLiked = likedBy.includes(userId);
             
             const div = document.createElement('div');
             div.className = 'message';
@@ -619,6 +644,14 @@ HTML = """
                 return;
             }
             
+            // Ждём, пока загрузятся данные пользователя
+            if (!userId || !userName) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                if (!userId || !userName) {
+                    useLocalStorage();
+                }
+            }
+            
             const data = {
                 post_id: postId,
                 user_id: userId,
@@ -646,9 +679,6 @@ HTML = """
                     pendingMediaType = null;
                     cancelReply();
                     await loadMessages();
-                    setTimeout(() => {
-                        if (window.Maxi && window.Maxi.close) window.Maxi.close();
-                    }, 1000);
                 } else {
                     showStatus('Ошибка отправки', 'error');
                 }
@@ -658,14 +688,20 @@ HTML = """
         }
         
         async function likeComment(id) {
+            if (!userId) return;
             try {
-                await fetch(`/api/comment/${id}/like`, {
+                const response = await fetch(`/api/comment/${id}/like`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user_id: userId })
                 });
-                loadMessages();
-            } catch(e) { console.error(e); }
+                if (response.ok) {
+                    loadMessages();
+                }
+            } catch(e) { 
+                console.error(e); 
+                showStatus('Ошибка лайка', 'error');
+            }
         }
         
         async function editComment(id, oldText) {
@@ -771,7 +807,7 @@ def add_comment():
         data.get("media_type"),
         data.get("media_data"),
         datetime.now().isoformat(),
-        "[]"
+        json.dumps([])
     ))
     conn.commit()
     conn.close()
@@ -786,12 +822,18 @@ def like_comment(id):
     c.execute("SELECT liked_by FROM comments WHERE id = ?", (id,))
     row = c.fetchone()
     if row:
-        liked_by = eval(row[0]) if row[0] else []
+        try:
+            liked_by = json.loads(row[0]) if row[0] else []
+        except:
+            liked_by = []
+        
         if user_id in liked_by:
             liked_by.remove(user_id)
         else:
             liked_by.append(user_id)
-        c.execute("UPDATE comments SET likes = ?, liked_by = ? WHERE id = ?", (len(liked_by), str(liked_by), id))
+        
+        c.execute("UPDATE comments SET likes = ?, liked_by = ? WHERE id = ?", 
+                  (len(liked_by), json.dumps(liked_by), id))
         conn.commit()
     conn.close()
     return jsonify({"ok": True})
