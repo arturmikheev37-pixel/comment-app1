@@ -1,13 +1,9 @@
 from flask import Flask, request, jsonify, render_template_string
-from flask_socketio import SocketIO, emit, join_room
 import sqlite3
 from datetime import datetime
 import json
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app, cors_allowed_origins="*")
-
 DB_PATH = "comments.db"
 
 def init_db():
@@ -38,7 +34,6 @@ HTML = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
     <title>Комментарии</title>
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -313,7 +308,6 @@ HTML = """
         let postId = urlParams.get('startapp') || urlParams.get('post') || 'general';
         document.getElementById('postIdDisplay').innerHTML = postId.length > 35 ? postId.substring(0, 35) + '...' : postId;
         
-        // Получаем данные пользователя
         let userId = localStorage.getItem('comment_user_id');
         if (!userId) {
             userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
@@ -349,16 +343,6 @@ HTML = """
             }
         });
         
-        // WebSocket подключение
-        const socket = io();
-        socket.emit('join', postId);
-        
-        socket.on('new_comment', function(comment) {
-            console.log('Новый комментарий:', comment);
-            addCommentToTop(comment);
-            showStatus('💬 Новый комментарий!', 'success');
-        });
-        
         function getAvatarColor(name) {
             let hash = 0;
             for (let i = 0; i < name.length; i++) {
@@ -369,7 +353,6 @@ HTML = """
             return colors[Math.abs(hash) % colors.length];
         }
         
-        // Загрузка всех комментариев при старте
         async function loadMessages() {
             try {
                 const response = await fetch(`/api/comments/${encodeURIComponent(postId)}`);
@@ -450,42 +433,6 @@ HTML = """
             container.appendChild(div);
         }
         
-        function addCommentToTop(comment) {
-            const container = document.getElementById('messagesContainer');
-            const time = new Date(comment.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-            const avatarColor = getAvatarColor(comment.username);
-            const letter = (comment.username.charAt(0) || '?').toUpperCase();
-            const isMine = comment.user_id === userId;
-            
-            const div = document.createElement('div');
-            div.className = 'message';
-            div.id = `msg-${comment.id}`;
-            div.innerHTML = `
-                <div class="message-avatar" style="background: ${avatarColor}">${escapeHtml(letter)}</div>
-                <div class="message-content">
-                    <div class="message-header">
-                        <span class="message-name">${escapeHtml(comment.username)}</span>
-                        ${isMine ? '<span class="message-badge">Вы</span>' : ''}
-                        <span class="message-time">${time}</span>
-                    </div>
-                    <div class="message-text">${escapeHtml(comment.comment)}</div>
-                    <div class="message-actions">
-                        <button class="like-btn" onclick="likeComment(${comment.id})">❤️ 0</button>
-                        <button class="reply-btn" onclick="setReply(${comment.id}, '${escapeHtml(comment.username)}')">💬 Ответить</button>
-                        ${isMine ? `<button onclick="editComment(${comment.id}, '${escapeHtml(comment.comment).replace(/'/g, "\\'")}')">✏️</button>` : ''}
-                        ${isMine ? `<button onclick="deleteComment(${comment.id})">🗑</button>` : ''}
-                    </div>
-                </div>
-            `;
-            
-            const emptyState = container.querySelector('.empty-state');
-            if (emptyState) {
-                container.innerHTML = '';
-            }
-            container.insertBefore(div, container.firstChild);
-            container.scrollTop = container.scrollHeight;
-        }
-        
         function addReplyToDOM(container, reply) {
             const time = new Date(reply.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
             const avatarColor = getAvatarColor(reply.username);
@@ -558,6 +505,7 @@ HTML = """
                     messageInput.value = '';
                     messageInput.style.height = 'auto';
                     cancelReply();
+                    await loadMessages(); // Мгновенно обновляем после отправки
                     showStatus('✅ Отправлено!', 'success');
                 } else {
                     showStatus('❌ Ошибка', 'error');
@@ -641,18 +589,7 @@ def add_comment():
     c.execute("INSERT INTO comments (post_id, parent_id, user_id, username, comment, created_at, liked_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
               (data["post_id"], data.get("parent_id", 0), data["user_id"], data["username"], data["comment"], datetime.now().isoformat(), json.dumps([])))
     conn.commit()
-    
-    # Получаем новый комментарий для отправки через WebSocket
-    comment_id = c.lastrowid
-    c.execute("SELECT id, parent_id, user_id, username, comment, likes, liked_by, created_at FROM comments WHERE id = ?", (comment_id,))
-    row = c.fetchone()
     conn.close()
-    
-    new_comment = {"id": row[0], "parent_id": row[1] or 0, "user_id": row[2], "username": row[3], "comment": row[4], "likes": row[5], "liked_by": row[6], "created_at": row[7]}
-    
-    # Отправляем всем в комнате
-    socketio.emit('new_comment', new_comment, room=data["post_id"])
-    
     return jsonify({"ok": True})
 
 @app.route('/api/comment/<int:id>/like', methods=['POST'])
@@ -698,11 +635,5 @@ def delete_comment(id):
 def health():
     return jsonify({"status": "ok"})
 
-@socketio.on('join')
-def on_join(data):
-    room = data
-    join_room(room)
-    print(f"Клиент подключился к комнате {room}")
-
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000)
