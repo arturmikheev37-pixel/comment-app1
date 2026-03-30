@@ -39,6 +39,7 @@ def init_db():
             post_id TEXT PRIMARY KEY,
             source_post_id TEXT,
             button_message_id TEXT,
+            counter_enabled INTEGER NOT NULL DEFAULT 1,
             post_text TEXT NOT NULL DEFAULT '',
             message_text TEXT NOT NULL DEFAULT '',
             attachments_json TEXT NOT NULL DEFAULT '[]',
@@ -81,6 +82,8 @@ def init_db():
         cursor.execute("ALTER TABLE posts ADD COLUMN source_post_id TEXT")
     if "button_message_id" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN button_message_id TEXT")
+    if "counter_enabled" not in post_columns:
+        cursor.execute("ALTER TABLE posts ADD COLUMN counter_enabled INTEGER NOT NULL DEFAULT 1")
     if "post_text" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN post_text TEXT NOT NULL DEFAULT ''")
     if "message_text" not in post_columns:
@@ -214,7 +217,7 @@ def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> d
 def get_post_info(post_id: str) -> dict | None:
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT post_id, source_post_id, button_message_id, post_text, message_text, attachments_json, created_at FROM posts WHERE post_id = ?",
+        "SELECT post_id, source_post_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at FROM posts WHERE post_id = ?",
         (post_id,),
     ).fetchone()
     conn.close()
@@ -224,6 +227,7 @@ def get_post_info(post_id: str) -> dict | None:
         "post_id": row["post_id"],
         "source_post_id": row["source_post_id"],
         "button_message_id": row["button_message_id"],
+        "counter_enabled": row["counter_enabled"],
         "post_text": row["post_text"],
         "message_text": row["message_text"],
         "attachments_json": row["attachments_json"],
@@ -234,7 +238,7 @@ def get_post_info(post_id: str) -> dict | None:
 def refresh_post_button(post_id: str):
     post = get_post_info(post_id)
     target_message_id = (post or {}).get("button_message_id") or (post or {}).get("source_post_id")
-    if not post or not target_message_id:
+    if not post or not target_message_id or not post.get("counter_enabled"):
         return
 
     conn = get_db_connection()
@@ -1215,6 +1219,7 @@ def register_post():
     post_id = normalize_post_id(payload.get("post_id"))
     source_post_id = str(payload.get("source_post_id") or "").strip()[:256]
     button_message_id = str(payload.get("button_message_id") or "").strip()[:256]
+    counter_enabled = 1 if payload.get("counter_enabled", True) else 0
     post_text = (payload.get("post_text") or "").strip()[:4000]
     message_text = (payload.get("message_text") or "").strip()[:4000]
     attachments_json = payload.get("attachments") or []
@@ -1226,16 +1231,17 @@ def register_post():
     conn = get_db_connection()
     conn.execute(
         """
-        INSERT INTO posts (post_id, source_post_id, button_message_id, post_text, message_text, attachments_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO posts (post_id, source_post_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(post_id) DO UPDATE SET
             source_post_id = excluded.source_post_id,
             button_message_id = excluded.button_message_id,
+            counter_enabled = excluded.counter_enabled,
             post_text = excluded.post_text,
             message_text = excluded.message_text,
             attachments_json = excluded.attachments_json
         """,
-        (post_id, source_post_id, button_message_id, post_text, message_text, json.dumps(attachments_json, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
+        (post_id, source_post_id, button_message_id, counter_enabled, post_text, message_text, json.dumps(attachments_json, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     conn.close()
