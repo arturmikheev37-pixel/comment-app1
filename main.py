@@ -171,7 +171,11 @@ def restore_store_db_if_needed():
 
 
 def restore_store_archive_if_needed():
-    needs_restore = (not os.path.exists(DB_PATH)) or (not os.path.isdir(UPLOAD_DIR))
+    needs_restore = (
+        (not os.path.exists(DB_PATH))
+        or (not os.path.isdir(UPLOAD_DIR))
+        or (count_comments_in_db(DB_PATH) == 0 and os.path.exists(STORE_ARCHIVE_PATH))
+    )
     if not needs_restore or not os.path.exists(STORE_ARCHIVE_PATH):
         return False
 
@@ -1738,6 +1742,7 @@ def register_post():
     )
     conn.commit()
     conn.close()
+    sync_store_db("post-upsert")
     update_store_archive("post-upsert")
     create_backup("post-upsert")
     return jsonify({"status": "success"})
@@ -1810,6 +1815,7 @@ def add_comment():
     conn.commit()
     comment_id = cursor.lastrowid
     conn.close()
+    sync_store_db("comment-create")
     update_store_archive("comment-create")
     create_backup("comment-create")
     refresh_post_button(post_id)
@@ -1841,6 +1847,7 @@ def edit_comment(comment_id):
     conn.execute("UPDATE comments SET comment = ?, edited_at = ? WHERE id = ?", (comment, edited_at, comment_id))
     conn.commit()
     conn.close()
+    sync_store_db("comment-edit")
     update_store_archive("comment-edit")
     create_backup("comment-edit")
     return jsonify({"status": "success", "edited_at": edited_at})
@@ -1868,6 +1875,7 @@ def delete_comment(comment_id):
         file_path = os.path.join(UPLOAD_DIR, row["media_path"])
         if os.path.exists(file_path):
             os.remove(file_path)
+    sync_store_db("comment-delete")
     update_store_archive("comment-delete")
     create_backup("comment-delete")
     refresh_post_button(row["post_id"])
@@ -1892,6 +1900,8 @@ def health():
         {
             "status": "ok",
             "db_exists": os.path.exists(DB_PATH),
+            "store_db_exists": os.path.exists(STORE_DB_PATH),
+            "store_db_path": STORE_DB_PATH,
             "store_archive_exists": os.path.exists(STORE_ARCHIVE_PATH),
             "store_archive_path": STORE_ARCHIVE_PATH,
             "backup_dir": BACKUP_DIR,
@@ -1905,11 +1915,13 @@ def request_too_large(_error):
     return jsonify({"error": "Файл слишком большой для загрузки"}), 413
 
 
+restore_store_db_if_needed()
 restore_store_archive_if_needed()
 init_db()
+sync_store_db("startup")
 update_store_archive("startup")
 create_backup("startup")
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=os.getenv("APP_DEBUG", "").lower() == "true")
