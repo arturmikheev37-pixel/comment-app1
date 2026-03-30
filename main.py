@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 from datetime import datetime
 import json
-import os
 
 app = Flask(__name__)
 DB_PATH = "comments.db"
@@ -14,14 +13,10 @@ def init_db():
     CREATE TABLE IF NOT EXISTS comments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         post_id TEXT NOT NULL,
-        parent_id INTEGER DEFAULT 0,
         user_id TEXT NOT NULL,
         username TEXT NOT NULL,
         comment TEXT NOT NULL,
-        likes INTEGER DEFAULT 0,
-        liked_by TEXT DEFAULT '[]',
-        created_at TEXT NOT NULL,
-        updated_at TEXT
+        created_at TEXT NOT NULL
     )
     """)
     conn.commit()
@@ -34,7 +29,7 @@ HTML = """
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Комментарии</title>
     <style>
         * {
@@ -42,635 +37,276 @@ HTML = """
             padding: 0;
             box-sizing: border-box;
         }
-        
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #0e0e10;
             color: #e4e6eb;
-            height: 100vh;
-            display: flex;
-            flex-direction: column;
+            padding: 20px;
+            padding-bottom: 100px;
         }
-        
-        .chat-header {
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        .post-info {
             background: #1e1e22;
-            padding: 12px 16px;
-            border-bottom: 1px solid #2a2a2e;
-            text-align: center;
-            flex-shrink: 0;
-        }
-        
-        .chat-title {
-            font-weight: 600;
-            font-size: 17px;
-        }
-        
-        .post-id {
-            font-size: 10px;
-            color: #8e8e93;
-            margin-top: 4px;
-            background: #2c2c30;
-            padding: 4px 10px;
+            padding: 12px;
             border-radius: 12px;
-            display: inline-block;
+            margin-bottom: 20px;
+            font-size: 12px;
+            color: #8e8e93;
             word-break: break-all;
-            max-width: 90%;
-        }
-        
-        .user-name {
-            font-size: 11px;
-            color: #0a84ff;
-            margin-top: 4px;
-        }
-        
-        .messages-area {
-            flex: 1;
-            overflow-y: auto;
-            padding: 12px 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        
-        .message {
-            display: flex;
-            gap: 10px;
-            max-width: 100%;
-            animation: fadeIn 0.2s ease;
-        }
-        
-        .message-avatar {
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-weight: 600;
-            font-size: 14px;
-            flex-shrink: 0;
-            background: #0a84ff;
-        }
-        
-        .message-content {
-            flex: 1;
-            background: #1e1e22;
-            border-radius: 18px;
-            padding: 8px 12px;
-            border: 1px solid #2a2a2e;
-        }
-        
-        .message-header {
-            display: flex;
-            align-items: baseline;
-            gap: 8px;
-            flex-wrap: wrap;
-            margin-bottom: 4px;
-        }
-        
-        .message-name {
-            font-weight: 600;
-            font-size: 14px;
-        }
-        
-        .message-badge {
-            font-size: 10px;
-            background: #2c2c30;
-            color: #8e8e93;
-            padding: 2px 6px;
-            border-radius: 10px;
-        }
-        
-        .message-time {
-            font-size: 10px;
-            color: #8e8e93;
-        }
-        
-        .message-text {
-            font-size: 14px;
-            line-height: 1.4;
-            word-break: break-word;
-            margin: 4px 0;
-        }
-        
-        .message-actions {
-            display: flex;
-            gap: 12px;
-            margin-top: 6px;
-            font-size: 12px;
-        }
-        
-        .message-actions button {
-            background: none;
-            border: none;
-            color: #8e8e93;
-            cursor: pointer;
-            font-size: 12px;
-            padding: 2px 0;
-        }
-        
-        .like-btn.liked {
-            color: #ff375f;
-        }
-        
-        .reply-btn {
-            color: #0a84ff;
-        }
-        
-        .reply-toggle {
-            font-size: 11px;
-            color: #8e8e93;
-            cursor: pointer;
-            margin-left: 46px;
-            margin-top: 4px;
-            display: inline-block;
-        }
-        
-        .replies-container {
-            margin-left: 46px;
-            margin-top: 8px;
-            display: none;
-        }
-        
-        .empty-state {
             text-align: center;
-            padding: 60px 20px;
-            color: #8e8e93;
         }
-        
-        .input-bar {
+        .comment-form {
             background: #1e1e22;
-            border-top: 1px solid #2a2a2e;
-            padding: 8px 12px;
-            display: flex;
-            align-items: flex-end;
-            gap: 8px;
-            flex-shrink: 0;
+            border-radius: 16px;
+            padding: 16px;
+            margin-bottom: 20px;
         }
-        
-        .input-wrapper {
-            flex: 1;
-            background: #2c2c30;
-            border-radius: 24px;
-            padding: 8px 16px;
+        .form-group {
+            margin-bottom: 12px;
         }
-        
-        .input-wrapper textarea {
+        .form-group input, .form-group textarea {
             width: 100%;
-            background: none;
-            border: none;
+            padding: 12px;
+            background: #2c2c30;
+            border: 1px solid #3a3a3e;
+            border-radius: 12px;
             color: #e4e6eb;
             font-size: 15px;
             font-family: inherit;
-            resize: none;
+        }
+        .form-group input:focus, .form-group textarea:focus {
             outline: none;
-            min-height: 24px;
-            max-height: 100px;
+            border-color: #0a84ff;
         }
-        
-        .send-btn {
+        .form-group textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
             background: #0a84ff;
+            color: white;
             border: none;
-            width: 36px;
-            height: 36px;
-            border-radius: 36px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
             cursor: pointer;
-            flex-shrink: 0;
         }
-        
-        .send-btn svg {
-            width: 18px;
-            height: 18px;
-            fill: white;
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
         }
-        
-        .reply-indicator {
-            background: #2c2c30;
-            padding: 6px 12px;
-            border-radius: 20px;
-            margin: 0 12px 4px 12px;
-            font-size: 12px;
-            display: none;
-            align-items: center;
+        .comments-header {
+            display: flex;
             justify-content: space-between;
+            margin-bottom: 16px;
+            padding: 0 4px;
         }
-        
-        .reply-indicator button {
+        .comments-count {
+            font-size: 14px;
+            color: #8e8e93;
+        }
+        .refresh-btn {
             background: none;
             border: none;
-            color: #ff453a;
+            color: #0a84ff;
+            font-size: 13px;
             cursor: pointer;
         }
-        
-        .status {
-            position: fixed;
-            bottom: 80px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: #2c2c30;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 12px;
-            opacity: 0;
-            transition: opacity 0.2s;
-            pointer-events: none;
-            z-index: 200;
+        .comments-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
         }
-        
-        .status.show {
-            opacity: 1;
+        .comment-card {
+            background: #1e1e22;
+            border-radius: 16px;
+            padding: 12px;
+            border: 1px solid #2a2a2e;
         }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(5px); }
-            to { opacity: 1; transform: translateY(0); }
+        .comment-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
         }
-        
-        .loading {
+        .comment-name {
+            font-weight: 600;
+            font-size: 14px;
+            color: #0a84ff;
+        }
+        .comment-time {
+            font-size: 11px;
+            color: #8e8e93;
+        }
+        .comment-text {
+            font-size: 14px;
+            line-height: 1.4;
+            word-break: break-word;
+        }
+        .empty-state {
             text-align: center;
             padding: 40px;
             color: #8e8e93;
         }
-        
-        .refresh-indicator {
-            text-align: center;
-            font-size: 10px;
-            color: #5e5e66;
-            padding: 4px;
-            margin-top: 8px;
+        .status {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #2c2c30;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 13px;
+            opacity: 0;
+            transition: opacity 0.2s;
+            pointer-events: none;
+        }
+        .status.show {
+            opacity: 1;
         }
     </style>
 </head>
 <body>
-    <div class="chat-header">
-        <div class="chat-title">💬 Комментарии</div>
-        <div class="post-id" id="postIdDisplay"></div>
-        <div class="user-name" id="userNameDisplay"></div>
-    </div>
-    
-    <div id="messagesContainer" class="messages-area">
-        <div class="loading">Загрузка...</div>
-    </div>
-    
-    <div class="refresh-indicator" id="refreshIndicator">
-        🔄 обновлено только что
-    </div>
-    
-    <div id="replyIndicator" class="reply-indicator">
-        <span>📎 Ответ <strong id="replyToName"></strong></span>
-        <button onclick="cancelReply()">✕</button>
-    </div>
-    
-    <div class="input-bar">
-        <div class="input-wrapper">
-            <textarea id="messageInput" placeholder="Сообщение..." rows="1"></textarea>
+    <div class="container">
+        <div class="post-info" id="postInfo">Загрузка...</div>
+        
+        <div class="comment-form">
+            <div class="form-group">
+                <input type="text" id="username" placeholder="Ваше имя" maxlength="50">
+            </div>
+            <div class="form-group">
+                <textarea id="comment" placeholder="Написать комментарий..." rows="3" maxlength="500"></textarea>
+            </div>
+            <button id="submitBtn" onclick="sendComment()">📤 Отправить</button>
         </div>
-        <button class="send-btn" onclick="sendMessage()">
-            <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-        </button>
+        
+        <div class="comments-header">
+            <span class="comments-count" id="commentsCount">Комментарии (0)</span>
+            <button class="refresh-btn" onclick="loadComments()">🔄 Обновить</button>
+        </div>
+        
+        <div id="commentsList" class="comments-list">
+            <div class="empty-state">Загрузка...</div>
+        </div>
     </div>
     
     <div id="status" class="status"></div>
 
     <script>
-        // ========== ПОЛУЧАЕМ ДАННЫЕ ИЗ URL (от бота) ==========
+        // Получаем данные из URL
         const urlParams = new URLSearchParams(window.location.search);
-        let postId = urlParams.get('startapp');
-        let userId = urlParams.get('user_id');
-        let userName = urlParams.get('username');
-        
-        // Если нет startapp — пробуем другие варианты
-        if (!postId) {
-            postId = urlParams.get('post') || 'general';
-        }
+        const postId = urlParams.get('startapp') || urlParams.get('post_id') || 'general';
         
         // Отображаем ID поста
-        document.getElementById('postIdDisplay').innerHTML = postId.length > 50 ? postId.substring(0, 47) + '...' : postId;
+        document.getElementById('postInfo').innerHTML = `📌 Пост: ${postId.length > 40 ? postId.substring(0, 40) + '...' : postId}`;
         
-        // ========== СОХРАНЯЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ ==========
-        if (userId && userName) {
-            // Используем данные от бота
-            console.log('Данные от бота:', userId, userName);
+        // Данные пользователя
+        let userId = localStorage.getItem('comment_user_id');
+        if (!userId) {
+            userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
             localStorage.setItem('comment_user_id', userId);
+        }
+        
+        let userName = localStorage.getItem('comment_username');
+        if (!userName) {
+            userName = urlParams.get('username') || 'Гость';
             localStorage.setItem('comment_username', userName);
-            document.getElementById('userNameDisplay').innerHTML = `👤 ${userName}`;
-        } else {
-            // Fallback: берём из localStorage
-            userId = localStorage.getItem('comment_user_id');
-            userName = localStorage.getItem('comment_username');
-            
-            if (!userId) {
-                userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
-                localStorage.setItem('comment_user_id', userId);
-            }
-            
-            if (!userName) {
-                userName = 'Гость';
-                localStorage.setItem('comment_username', userName);
-            }
-            
-            document.getElementById('userNameDisplay').innerHTML = `👤 ${userName}`;
         }
         
-        console.log('Пользователь:', userId, userName);
-        
-        let replyToId = null;
-        let replyToName = null;
-        let lastUpdateTime = Date.now();
-        
-        const messageInput = document.getElementById('messageInput');
-        const refreshIndicator = document.getElementById('refreshIndicator');
-        
-        messageInput.addEventListener('input', function() {
-            this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 100) + 'px';
+        document.getElementById('username').value = userName;
+        document.getElementById('username').addEventListener('input', function() {
+            userName = this.value.trim();
+            if (userName) localStorage.setItem('comment_username', userName);
         });
         
-        messageInput.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-            }
-        });
-        
-        function getAvatarColor(name) {
-            let hash = 0;
-            for (let i = 0; i < name.length; i++) {
-                hash = ((hash << 5) - hash) + name.charCodeAt(i);
-                hash |= 0;
-            }
-            const colors = ['#0a84ff', '#30d158', '#ff9f0a', '#ff375f', '#5e5ce6', '#64d2ff', '#bf5af2'];
-            return colors[Math.abs(hash) % colors.length];
-        }
-        
-        function updateRefreshIndicator() {
-            const now = Date.now();
-            const seconds = Math.floor((now - lastUpdateTime) / 1000);
-            if (seconds < 3) {
-                refreshIndicator.innerHTML = '🔄 обновлено только что';
-            } else {
-                refreshIndicator.innerHTML = `🔄 обновлено ${seconds} сек назад`;
-            }
-        }
-        
-        // ========== ЗАГРУЗКА КОММЕНТАРИЕВ ==========
-        let isLoading = false;
-        let lastCommentCount = 0;
-        
-        async function loadMessages() {
-            if (isLoading) return;
-            isLoading = true;
-            
+        // Загрузка комментариев
+        async function loadComments() {
             try {
                 const response = await fetch(`/api/comments/${encodeURIComponent(postId)}`);
                 const data = await response.json();
-                const container = document.getElementById('messagesContainer');
+                const container = document.getElementById('commentsList');
                 
                 if (data.comments && data.comments.length > 0) {
-                    // Проверяем, изменилось ли количество комментариев
-                    if (data.comments.length !== lastCommentCount) {
-                        lastCommentCount = data.comments.length;
-                        renderComments(data.comments, container);
-                        lastUpdateTime = Date.now();
-                        updateRefreshIndicator();
-                    } else {
-                        // Проверяем, не изменился ли последний комментарий
-                        const lastComment = data.comments[data.comments.length - 1];
-                        const lastDiv = container.lastChild;
-                        if (lastDiv && lastDiv.id !== `msg-${lastComment.id}`) {
-                            renderComments(data.comments, container);
-                            lastUpdateTime = Date.now();
-                            updateRefreshIndicator();
-                        }
-                    }
+                    container.innerHTML = '';
+                    data.comments.forEach(comment => {
+                        const time = new Date(comment.created_at).toLocaleString();
+                        const div = document.createElement('div');
+                        div.className = 'comment-card';
+                        div.innerHTML = `
+                            <div class="comment-header">
+                                <span class="comment-name">${escapeHtml(comment.username)}</span>
+                                <span class="comment-time">${time}</span>
+                            </div>
+                            <div class="comment-text">${escapeHtml(comment.comment)}</div>
+                        `;
+                        container.appendChild(div);
+                    });
                 } else {
-                    if (container.innerHTML !== `<div class="empty-state">💬 Нет сообщений<br><span style="font-size:12px">Напишите первое сообщение</span></div>`) {
-                        container.innerHTML = `<div class="empty-state">💬 Нет сообщений<br><span style="font-size:12px">Напишите первое сообщение</span></div>`;
-                        lastUpdateTime = Date.now();
-                        updateRefreshIndicator();
-                    }
+                    container.innerHTML = '<div class="empty-state">💬 Нет комментариев. Будьте первым!</div>';
                 }
+                document.getElementById('commentsCount').textContent = `Комментарии (${data.comments?.length || 0})`;
             } catch (error) {
                 console.error(error);
-            } finally {
-                isLoading = false;
             }
         }
         
-        function renderComments(comments, container) {
-            const rootComments = comments.filter(c => c.parent_id === 0);
-            const replies = comments.filter(c => c.parent_id !== 0);
+        // Отправка комментария
+        async function sendComment() {
+            const username = userName.trim();
+            const commentText = document.getElementById('comment').value.trim();
             
-            container.innerHTML = '';
-            
-            rootComments.forEach(c => {
-                addMessageToDOM(container, c);
-                const childReplies = replies.filter(r => r.parent_id === c.id);
-                if (childReplies.length > 0) {
-                    const toggle = document.createElement('div');
-                    toggle.className = 'reply-toggle';
-                    toggle.textContent = `▼ ${childReplies.length} ответов`;
-                    toggle.onclick = () => {
-                        const repliesDiv = document.getElementById(`replies-${c.id}`);
-                        if (repliesDiv.style.display === 'none') {
-                            repliesDiv.style.display = 'block';
-                            toggle.textContent = `▲ ${childReplies.length} ответов`;
-                        } else {
-                            repliesDiv.style.display = 'none';
-                            toggle.textContent = `▼ ${childReplies.length} ответов`;
-                        }
-                    };
-                    container.appendChild(toggle);
-                    
-                    const repliesDiv = document.createElement('div');
-                    repliesDiv.id = `replies-${c.id}`;
-                    repliesDiv.className = 'replies-container';
-                    repliesDiv.style.display = 'none';
-                    childReplies.forEach(r => addReplyToDOM(repliesDiv, r));
-                    container.appendChild(repliesDiv);
-                }
-            });
-            
-            container.scrollTop = container.scrollHeight;
-        }
-        
-        function addMessageToDOM(container, comment) {
-            const time = new Date(comment.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-            const avatarColor = getAvatarColor(comment.username);
-            const letter = (comment.username.charAt(0) || '?').toUpperCase();
-            const isMine = comment.user_id === userId;
-            let likedBy = [];
-            try { likedBy = JSON.parse(comment.liked_by || '[]'); } catch(e) {}
-            const isLiked = likedBy.includes(userId);
-            
-            const div = document.createElement('div');
-            div.className = 'message';
-            div.id = `msg-${comment.id}`;
-            div.innerHTML = `
-                <div class="message-avatar" style="background: ${avatarColor}">${escapeHtml(letter)}</div>
-                <div class="message-content">
-                    <div class="message-header">
-                        <span class="message-name">${escapeHtml(comment.username)}</span>
-                        ${isMine ? '<span class="message-badge">Вы</span>' : ''}
-                        <span class="message-time">${time}</span>
-                    </div>
-                    <div class="message-text" id="text-${comment.id}">${escapeHtml(comment.comment)}</div>
-                    <div class="message-actions">
-                        <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="likeComment(${comment.id})">❤️ ${comment.likes || 0}</button>
-                        <button class="reply-btn" onclick="setReply(${comment.id}, '${escapeHtml(comment.username)}')">💬 Ответить</button>
-                        ${isMine ? `<button onclick="editComment(${comment.id}, '${escapeHtml(comment.comment).replace(/'/g, "\\'")}')">✏️</button>` : ''}
-                        ${isMine ? `<button onclick="deleteComment(${comment.id})">🗑</button>` : ''}
-                    </div>
-                </div>
-            `;
-            container.appendChild(div);
-        }
-        
-        function addReplyToDOM(container, reply) {
-            const time = new Date(reply.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-            const avatarColor = getAvatarColor(reply.username);
-            const letter = (reply.username.charAt(0) || '?').toUpperCase();
-            const isMine = reply.user_id === userId;
-            let likedBy = [];
-            try { likedBy = JSON.parse(reply.liked_by || '[]'); } catch(e) {}
-            const isLiked = likedBy.includes(userId);
-            
-            const div = document.createElement('div');
-            div.className = 'message';
-            div.id = `msg-${reply.id}`;
-            div.style.marginTop = '8px';
-            div.innerHTML = `
-                <div class="message-avatar" style="background: ${avatarColor}">${escapeHtml(letter)}</div>
-                <div class="message-content">
-                    <div class="message-header">
-                        <span class="message-name">${escapeHtml(reply.username)}</span>
-                        ${isMine ? '<span class="message-badge">Вы</span>' : ''}
-                        <span class="message-time">${time}</span>
-                    </div>
-                    <div class="message-text" id="text-${reply.id}">${escapeHtml(reply.comment)}</div>
-                    <div class="message-actions">
-                        <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="likeComment(${reply.id})">❤️ ${reply.likes || 0}</button>
-                        <button class="reply-btn" onclick="setReply(${reply.id}, '${escapeHtml(reply.username)}')">💬 Ответить</button>
-                        ${isMine ? `<button onclick="editComment(${reply.id}, '${escapeHtml(reply.comment).replace(/'/g, "\\'")}')">✏️</button>` : ''}
-                        ${isMine ? `<button onclick="deleteComment(${reply.id})">🗑</button>` : ''}
-                    </div>
-                </div>
-            `;
-            container.appendChild(div);
-        }
-        
-        function setReply(id, name) {
-            replyToId = id;
-            replyToName = name;
-            document.getElementById('replyIndicator').style.display = 'flex';
-            document.getElementById('replyToName').textContent = name;
-            messageInput.focus();
-        }
-        
-        function cancelReply() {
-            replyToId = null;
-            replyToName = null;
-            document.getElementById('replyIndicator').style.display = 'none';
-        }
-        
-        async function sendMessage() {
-            const text = messageInput.value.trim();
-            if (!text) {
-                showStatus('Напишите сообщение', 'error');
+            if (!username) {
+                showStatus('Введите ваше имя', 'error');
+                return;
+            }
+            if (!commentText) {
+                showStatus('Напишите комментарий', 'error');
                 return;
             }
             
-            const data = {
-                post_id: postId,
-                user_id: userId,
-                username: userName,
-                comment: text
-            };
-            if (replyToId) data.parent_id = replyToId;
-            
-            const btn = document.querySelector('.send-btn');
+            const btn = document.getElementById('submitBtn');
             btn.disabled = true;
-            btn.style.opacity = '0.5';
+            btn.textContent = '⏳ Отправка...';
             
             try {
                 const response = await fetch('/api/comment', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
+                    body: JSON.stringify({
+                        post_id: postId,
+                        user_id: userId,
+                        username: username,
+                        comment: commentText
+                    })
                 });
                 
                 if (response.ok) {
-                    messageInput.value = '';
-                    messageInput.style.height = 'auto';
-                    cancelReply();
-                    showStatus('✅ Отправлено!', 'success');
-                    // Сразу обновляем комментарии
-                    await loadMessages();
+                    document.getElementById('comment').value = '';
+                    showStatus('✅ Комментарий отправлен!', 'success');
+                    loadComments();
+                    setTimeout(() => {
+                        if (window.Maxi && window.Maxi.close) window.Maxi.close();
+                    }, 1500);
                 } else {
-                    showStatus('❌ Ошибка', 'error');
+                    showStatus('❌ Ошибка отправки', 'error');
                 }
             } catch (error) {
                 showStatus('❌ Ошибка соединения', 'error');
             } finally {
                 btn.disabled = false;
-                btn.style.opacity = '1';
+                btn.textContent = '📤 Отправить';
             }
         }
         
-        async function likeComment(id) {
-            try {
-                const response = await fetch(`/api/comment/${id}/like`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId })
-                });
-                if (response.ok) {
-                    loadMessages();
-                }
-            } catch(e) { console.error(e); }
-        }
-        
-        async function editComment(id, oldText) {
-            const newText = prompt('Редактировать сообщение:', oldText);
-            if (newText && newText.trim() && newText !== oldText) {
-                try {
-                    const response = await fetch(`/api/comment/${id}`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ comment: newText.trim(), user_id: userId })
-                    });
-                    if (response.ok) {
-                        showStatus('✏️ Сообщение обновлено', 'success');
-                        loadMessages();
-                    }
-                } catch(e) { showStatus('❌ Ошибка', 'error'); }
-            }
-        }
-        
-        async function deleteComment(id) {
-            if (!confirm('Удалить сообщение?')) return;
-            try {
-                const response = await fetch(`/api/comment/${id}`, {
-                    method: 'DELETE',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId })
-                });
-                if (response.ok) {
-                    showStatus('🗑 Сообщение удалено', 'success');
-                    loadMessages();
-                }
-            } catch(e) { showStatus('❌ Ошибка', 'error'); }
-        }
-        
-        function showStatus(msg, type) {
-            const div = document.getElementById('status');
-            div.textContent = msg;
-            div.classList.add('show');
-            setTimeout(() => div.classList.remove('show'), 2000);
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.classList.add('show');
+            setTimeout(() => statusDiv.classList.remove('show'), 2000);
         }
         
         function escapeHtml(text) {
@@ -679,14 +315,8 @@ HTML = """
             return div.innerHTML;
         }
         
-        // Загружаем комментарии при старте
-        loadMessages();
-        
-        // Автообновление каждые 5 секунд
-        setInterval(() => {
-            loadMessages();
-            updateRefreshIndicator();
-        }, 5000);
+        loadComments();
+        setInterval(loadComments, 10000);
     </script>
 </body>
 </html>
@@ -700,10 +330,10 @@ def index():
 def get_comments(post_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, parent_id, user_id, username, comment, likes, liked_by, created_at FROM comments WHERE post_id = ? ORDER BY created_at ASC", (post_id,))
+    c.execute("SELECT id, user_id, username, comment, created_at FROM comments WHERE post_id = ? ORDER BY created_at DESC", (post_id,))
     rows = c.fetchall()
     conn.close()
-    comments = [{"id": r[0], "parent_id": r[1] or 0, "user_id": r[2], "username": r[3], "comment": r[4], "likes": r[5], "liked_by": r[6], "created_at": r[7]} for r in rows]
+    comments = [{"id": r[0], "user_id": r[1], "username": r[2], "comment": r[3], "created_at": r[4]} for r in rows]
     return jsonify({"comments": comments})
 
 @app.route('/api/comment', methods=['POST'])
@@ -711,55 +341,15 @@ def add_comment():
     data = request.get_json()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT INTO comments (post_id, parent_id, user_id, username, comment, created_at, liked_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
-              (data["post_id"], data.get("parent_id", 0), data["user_id"], data["username"], data["comment"], datetime.now().isoformat(), json.dumps([])))
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True})
-
-@app.route('/api/comment/<int:id>/like', methods=['POST'])
-def like_comment(id):
-    data = request.get_json()
-    user_id = data.get("user_id")
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT liked_by FROM comments WHERE id = ?", (id,))
-    row = c.fetchone()
-    if row:
-        liked_by = json.loads(row[0]) if row[0] else []
-        if user_id in liked_by:
-            liked_by.remove(user_id)
-        else:
-            liked_by.append(user_id)
-        c.execute("UPDATE comments SET likes = ?, liked_by = ? WHERE id = ?", (len(liked_by), json.dumps(liked_by), id))
-        conn.commit()
-    conn.close()
-    return jsonify({"ok": True})
-
-@app.route('/api/comment/<int:id>', methods=['PUT'])
-def edit_comment(id):
-    data = request.get_json()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE comments SET comment = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-              (data["comment"], datetime.now().isoformat(), id, data["user_id"]))
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True})
-
-@app.route('/api/comment/<int:id>', methods=['DELETE'])
-def delete_comment(id):
-    data = request.get_json()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM comments WHERE id = ? AND user_id = ?", (id, data["user_id"]))
+    c.execute("INSERT INTO comments (post_id, user_id, username, comment, created_at) VALUES (?, ?, ?, ?, ?)",
+              (data["post_id"], data["user_id"], data["username"], data["comment"], datetime.now().isoformat()))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "ok", "db_exists": os.path.exists(DB_PATH)})
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
