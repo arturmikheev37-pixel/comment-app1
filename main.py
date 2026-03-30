@@ -1,17 +1,19 @@
 from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 from datetime import datetime
+import os
+import base64
 import hashlib
-import re
 
 app = Flask(__name__)
 DB_PATH = "comments.db"
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ---------------- Инициализация базы ----------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Таблица комментариев
     c.execute("""
     CREATE TABLE IF NOT EXISTS comments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,7 +22,9 @@ def init_db():
         user_id TEXT NOT NULL,
         username TEXT NOT NULL,
         avatar_color TEXT,
-        comment TEXT NOT NULL,
+        comment TEXT,
+        media_type TEXT,
+        media_data TEXT,
         likes INTEGER DEFAULT 0,
         liked_by TEXT DEFAULT '[]',
         created_at TEXT NOT NULL,
@@ -51,267 +55,151 @@ HTML = """
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             background: #0e0e10;
             color: #e4e6eb;
-            padding: 12px;
-            padding-bottom: 80px;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
         }
         
-        .container {
-            max-width: 700px;
-            margin: 0 auto;
-        }
-        
-        /* Шапка поста */
-        .post-header {
+        /* Шапка */
+        .chat-header {
             background: #1e1e22;
-            border-radius: 16px;
-            padding: 16px;
-            margin-bottom: 20px;
-            border: 1px solid #2a2a2e;
+            padding: 14px 16px;
+            border-bottom: 1px solid #2a2a2e;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-shrink: 0;
         }
         
-        .post-title {
-            font-size: 18px;
+        .back-btn {
+            background: none;
+            border: none;
+            color: #0a84ff;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0 8px;
+        }
+        
+        .chat-title {
+            flex: 1;
             font-weight: 600;
-            margin-bottom: 8px;
+            font-size: 17px;
         }
         
         .post-id {
             font-size: 11px;
             color: #8e8e93;
-            word-break: break-all;
             background: #2c2c30;
-            padding: 6px 12px;
+            padding: 4px 10px;
             border-radius: 20px;
-            display: inline-block;
         }
         
-        /* Форма комментария */
-        .comment-form {
-            background: #1e1e22;
-            border-radius: 20px;
-            padding: 12px;
-            margin-bottom: 20px;
-            border: 1px solid #2a2a2e;
-        }
-        
-        .reply-indicator {
-            background: #2c2c30;
-            padding: 8px 12px;
-            border-radius: 12px;
-            margin-bottom: 10px;
-            font-size: 13px;
-            color: #8e8e93;
-            display: none;
-            align-items: center;
-            justify-content: space-between;
-        }
-        
-        .reply-indicator button {
-            background: none;
-            border: none;
-            color: #ff453a;
-            font-size: 14px;
-            cursor: pointer;
-        }
-        
-        .form-row {
-            display: flex;
-            gap: 10px;
-            align-items: flex-end;
-        }
-        
-        .form-group {
+        /* Область сообщений */
+        .messages-area {
             flex: 1;
-        }
-        
-        .form-group input {
-            width: 100%;
-            padding: 12px 14px;
-            background: #2c2c30;
-            border: 1px solid #3a3a3e;
-            border-radius: 24px;
-            font-size: 15px;
-            color: #e4e6eb;
-            transition: all 0.2s;
-        }
-        
-        .form-group input:focus {
-            outline: none;
-            border-color: #0a84ff;
-            background: #1e1e22;
-        }
-        
-        .form-group textarea {
-            width: 100%;
-            padding: 12px 14px;
-            background: #2c2c30;
-            border: 1px solid #3a3a3e;
-            border-radius: 20px;
-            font-size: 15px;
-            font-family: inherit;
-            resize: none;
-            color: #e4e6eb;
-            min-height: 44px;
-            max-height: 120px;
-        }
-        
-        .form-group textarea:focus {
-            outline: none;
-            border-color: #0a84ff;
-            background: #1e1e22;
-        }
-        
-        .send-btn {
-            background: #0a84ff;
-            border: none;
-            width: 44px;
-            height: 44px;
-            border-radius: 44px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            transition: opacity 0.2s;
-            flex-shrink: 0;
-        }
-        
-        .send-btn:active {
-            opacity: 0.7;
-        }
-        
-        .send-btn svg {
-            width: 22px;
-            height: 22px;
-            fill: white;
-        }
-        
-        /* Заголовок списка */
-        .comments-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-            padding: 0 4px;
-        }
-        
-        .comments-count {
-            font-size: 15px;
-            font-weight: 500;
-            color: #8e8e93;
-        }
-        
-        .refresh-btn {
-            background: none;
-            border: none;
-            color: #0a84ff;
-            font-size: 13px;
-            padding: 6px 12px;
-            cursor: pointer;
-            border-radius: 20px;
-        }
-        
-        /* Список комментариев */
-        .comments-list {
+            overflow-y: auto;
+            padding: 12px 16px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 8px;
         }
         
-        .comment-card {
-            background: #1e1e22;
-            border-radius: 16px;
-            padding: 12px;
-            border: 1px solid #2a2a2e;
-            transition: background 0.2s;
-        }
-        
-        .comment-reply {
-            margin-left: 44px;
-            margin-top: 12px;
-            padding-left: 12px;
-            border-left: 2px solid #3a3a3e;
-        }
-        
-        .comment-header {
+        /* Сообщение */
+        .message {
             display: flex;
-            align-items: flex-start;
-            gap: 12px;
+            gap: 10px;
+            max-width: 100%;
+            animation: fadeIn 0.2s ease;
         }
         
-        .comment-avatar {
-            width: 40px;
-            height: 40px;
+        .message-avatar {
+            width: 36px;
+            height: 36px;
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
             font-weight: 600;
-            font-size: 16px;
+            font-size: 14px;
             flex-shrink: 0;
             background: #0a84ff;
         }
         
-        .comment-content {
+        .message-content {
             flex: 1;
+            background: #1e1e22;
+            border-radius: 18px;
+            padding: 8px 12px;
+            border: 1px solid #2a2a2e;
         }
         
-        .comment-name-row {
+        .message-header {
             display: flex;
             align-items: baseline;
-            flex-wrap: wrap;
             gap: 8px;
+            flex-wrap: wrap;
             margin-bottom: 4px;
         }
         
-        .comment-name {
+        .message-name {
             font-weight: 600;
             font-size: 14px;
         }
         
-        .comment-badge {
-            font-size: 11px;
+        .message-badge {
+            font-size: 10px;
             background: #2c2c30;
             color: #8e8e93;
-            padding: 2px 8px;
-            border-radius: 12px;
+            padding: 2px 6px;
+            border-radius: 10px;
         }
         
-        .comment-time {
-            font-size: 11px;
+        .message-time {
+            font-size: 10px;
             color: #8e8e93;
         }
         
-        .comment-text {
+        .message-text {
             font-size: 14px;
-            line-height: 1.45;
-            margin: 6px 0 8px 0;
+            line-height: 1.4;
             word-break: break-word;
+            margin: 4px 0;
         }
         
-        .comment-actions {
+        /* Медиа */
+        .message-media {
+            margin-top: 6px;
+            max-width: 250px;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        
+        .message-media img, .message-media video {
+            max-width: 100%;
+            max-height: 200px;
+            border-radius: 12px;
+            cursor: pointer;
+        }
+        
+        /* Действия */
+        .message-actions {
             display: flex;
-            gap: 16px;
-            align-items: center;
-            margin-top: 4px;
+            gap: 12px;
+            margin-top: 6px;
+            font-size: 12px;
         }
         
-        .comment-actions button {
+        .message-actions button {
             background: none;
             border: none;
-            font-size: 12px;
             color: #8e8e93;
             cursor: pointer;
-            padding: 4px 8px;
-            border-radius: 16px;
-            transition: all 0.2s;
+            font-size: 12px;
+            padding: 2px 0;
             display: flex;
             align-items: center;
             gap: 4px;
-        }
-        
-        .comment-actions button:active {
-            background: #2c2c30;
         }
         
         .like-btn.liked {
@@ -322,32 +210,118 @@ HTML = """
             color: #0a84ff;
         }
         
-        .edit-btn, .delete-btn {
-            color: #8e8e93;
-        }
-        
-        .delete-btn:hover {
-            color: #ff453a;
-        }
-        
-        .reply-count {
-            font-size: 12px;
-            color: #8e8e93;
-            margin-left: 44px;
+        /* Ответы */
+        .replies-container {
+            margin-left: 46px;
             margin-top: 8px;
+            display: none;
+        }
+        
+        .reply-toggle {
+            font-size: 11px;
+            color: #8e8e93;
             cursor: pointer;
+            margin-top: 4px;
+            margin-left: 46px;
             display: inline-block;
         }
         
+        /* Пустое состояние */
         .empty-state {
             text-align: center;
             padding: 60px 20px;
             color: #8e8e93;
         }
         
-        .empty-state-icon {
-            font-size: 48px;
-            margin-bottom: 16px;
+        /* Форма внизу */
+        .input-bar {
+            background: #1e1e22;
+            border-top: 1px solid #2a2a2e;
+            padding: 8px 12px;
+            display: flex;
+            align-items: flex-end;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+        
+        .attach-btn {
+            background: none;
+            border: none;
+            color: #0a84ff;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 8px;
+            line-height: 1;
+        }
+        
+        .input-wrapper {
+            flex: 1;
+            background: #2c2c30;
+            border-radius: 24px;
+            padding: 8px 16px;
+            display: flex;
+            align-items: flex-end;
+            gap: 8px;
+        }
+        
+        .input-wrapper input {
+            flex: 1;
+            background: none;
+            border: none;
+            color: #e4e6eb;
+            font-size: 15px;
+            padding: 4px 0;
+            outline: none;
+        }
+        
+        .input-wrapper textarea {
+            flex: 1;
+            background: none;
+            border: none;
+            color: #e4e6eb;
+            font-size: 15px;
+            font-family: inherit;
+            resize: none;
+            outline: none;
+            min-height: 24px;
+            max-height: 100px;
+        }
+        
+        .send-btn {
+            background: #0a84ff;
+            border: none;
+            width: 36px;
+            height: 36px;
+            border-radius: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        
+        .send-btn svg {
+            width: 18px;
+            height: 18px;
+            fill: white;
+        }
+        
+        .reply-indicator {
+            background: #2c2c30;
+            padding: 6px 12px;
+            border-radius: 20px;
+            margin: 0 12px 4px 12px;
+            font-size: 12px;
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .reply-indicator button {
+            background: none;
+            border: none;
+            color: #ff453a;
+            cursor: pointer;
         }
         
         .status {
@@ -356,18 +330,22 @@ HTML = """
             left: 50%;
             transform: translateX(-50%);
             background: #2c2c30;
-            color: white;
-            padding: 8px 16px;
-            border-radius: 40px;
-            font-size: 13px;
-            z-index: 200;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
             opacity: 0;
             transition: opacity 0.2s;
             pointer-events: none;
+            z-index: 200;
         }
         
         .status.show {
             opacity: 1;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         
         .loading {
@@ -376,61 +354,46 @@ HTML = """
             color: #8e8e93;
         }
         
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(5px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        .comment-card {
-            animation: fadeIn 0.2s ease;
+        /* Скрытый инпут для файлов */
+        #fileInput {
+            display: none;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="post-header">
-            <div class="post-title">💬 Обсуждение</div>
-            <div class="post-id" id="postIdDisplay"></div>
-        </div>
-        
-        <div class="comment-form">
-            <div class="reply-indicator" id="replyIndicator">
-                <span>📎 Ответ для <strong id="replyToName"></strong></span>
-                <button onclick="cancelReply()">✕</button>
-            </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <input type="text" id="username" placeholder="Ваше имя" maxlength="50">
-                </div>
-                <div class="form-group">
-                    <textarea id="commentText" placeholder="Написать комментарий..." rows="1" maxlength="500"></textarea>
-                </div>
-                <button class="send-btn" onclick="sendComment()">
-                    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-                    </svg>
-                </button>
-            </div>
-        </div>
-        
-        <div class="comments-header">
-            <span class="comments-count" id="commentsCount">Комментарии (0)</span>
-            <button class="refresh-btn" onclick="loadComments()">🔄 Обновить</button>
-        </div>
-        
-        <div id="commentsList" class="comments-list">
-            <div class="loading">Загрузка комментариев...</div>
-        </div>
+    <div class="chat-header">
+        <button class="back-btn" onclick="closeApp()">←</button>
+        <div class="chat-title">💬 Обсуждение</div>
+        <div class="post-id" id="postIdDisplay"></div>
     </div>
     
+    <div id="messagesContainer" class="messages-area">
+        <div class="loading">Загрузка сообщений...</div>
+    </div>
+    
+    <div id="replyIndicator" class="reply-indicator">
+        <span>📎 Ответ <strong id="replyToName"></strong></span>
+        <button onclick="cancelReply()">✕</button>
+    </div>
+    
+    <div class="input-bar">
+        <button class="attach-btn" onclick="attachMedia()">📎</button>
+        <div class="input-wrapper">
+            <textarea id="messageInput" placeholder="Сообщение..." rows="1"></textarea>
+        </div>
+        <button class="send-btn" onclick="sendMessage()">
+            <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+    </div>
+    
+    <input type="file" id="fileInput" accept="image/*,video/*" onchange="handleFile()">
     <div id="status" class="status"></div>
 
     <script>
         // Получаем post_id из URL
         const urlParams = new URLSearchParams(window.location.search);
         let postId = urlParams.get('startapp') || urlParams.get('post') || 'general';
-        
-        document.getElementById('postIdDisplay').innerHTML = `📌 Пост: ${postId.length > 40 ? postId.substring(0, 40) + '...' : postId}`;
+        document.getElementById('postIdDisplay').innerHTML = postId.length > 30 ? postId.substring(0, 30)+'...' : postId;
         
         // Данные пользователя
         let userId = localStorage.getItem('comment_user_id');
@@ -440,36 +403,52 @@ HTML = """
         }
         
         let userName = localStorage.getItem('comment_username') || '';
-        if (userName) {
-            document.getElementById('username').value = userName;
-        }
-        
-        // Сохраняем имя
-        document.getElementById('username').addEventListener('input', function() {
-            userName = this.value.trim();
+        if (!userName) {
+            userName = prompt('Введите ваше имя:', 'Гость');
+            if (!userName) userName = 'Гость';
             localStorage.setItem('comment_username', userName);
-        });
+        }
         
         // Переменные для ответа
         let replyToId = null;
         let replyToName = null;
         
+        // Для медиа
+        let pendingMedia = null;
+        let pendingMediaType = null;
+        
         // Авто-расширение textarea
-        const commentText = document.getElementById('commentText');
-        commentText.addEventListener('input', function() {
+        const messageInput = document.getElementById('messageInput');
+        messageInput.addEventListener('input', function() {
             this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+            this.style.height = Math.min(this.scrollHeight, 100) + 'px';
         });
         
-        // Отправка по Ctrl+Enter
-        commentText.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        messageInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                sendComment();
+                sendMessage();
             }
         });
         
-        // Функция для генерации цвета аватарки
+        function attachMedia() {
+            document.getElementById('fileInput').click();
+        }
+        
+        function handleFile() {
+            const file = document.getElementById('fileInput').files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                pendingMedia = e.target.result;
+                pendingMediaType = file.type.startsWith('image/') ? 'image' : 'video';
+                showStatus('📎 Файл прикреплён. Отправьте сообщение.', 'success');
+            };
+            reader.readAsDataURL(file);
+            document.getElementById('fileInput').value = '';
+        }
+        
         function getAvatarColor(name) {
             let hash = 0;
             for (let i = 0; i < name.length; i++) {
@@ -480,16 +459,14 @@ HTML = """
             return colors[Math.abs(hash) % colors.length];
         }
         
-        // Загрузка комментариев
-        async function loadComments() {
+        async function loadMessages() {
             try {
                 const response = await fetch(`/api/comments/${encodeURIComponent(postId)}`);
                 const data = await response.json();
-                const container = document.getElementById('commentsList');
+                const container = document.getElementById('messagesContainer');
                 
                 if (data.comments && data.comments.length > 0) {
                     container.innerHTML = '';
-                    // Группируем по parent_id
                     const commentsMap = new Map();
                     const rootComments = [];
                     
@@ -508,116 +485,116 @@ HTML = """
                     });
                     
                     rootComments.forEach(c => {
-                        addCommentToDOM(c);
+                        addMessageToDOM(c);
                         if (c.replies && c.replies.length > 0) {
-                            c.replies.forEach(reply => addReplyToDOM(reply, c.id));
+                            const toggle = document.createElement('div');
+                            toggle.className = 'reply-toggle';
+                            toggle.textContent = `▼ ${c.replies.length} ответов`;
+                            toggle.onclick = () => toggleReplies(c.id, toggle);
+                            container.appendChild(toggle);
+                            
+                            const repliesDiv = document.createElement('div');
+                            repliesDiv.id = `replies-${c.id}`;
+                            repliesDiv.className = 'replies-container';
+                            repliesDiv.style.display = 'none';
+                            c.replies.forEach(reply => addReplyToContainer(repliesDiv, reply));
+                            container.appendChild(repliesDiv);
                         }
                     });
                 } else {
-                    container.innerHTML = `
-                        <div class="empty-state">
-                            <div class="empty-state-icon">💬</div>
-                            <div>Пока нет комментариев</div>
-                            <div style="font-size: 12px; margin-top: 8px;">Будьте первым!</div>
-                        </div>
-                    `;
+                    container.innerHTML = `<div class="empty-state">💬 Нет сообщений<br><span style="font-size:12px">Напишите первое сообщение</span></div>`;
                 }
-                document.getElementById('commentsCount').textContent = `Комментарии (${data.comments?.length || 0})`;
+                container.scrollTop = container.scrollHeight;
             } catch (error) {
-                console.error('Ошибка:', error);
-                document.getElementById('commentsList').innerHTML = '<div class="empty-state">⚠️ Ошибка загрузки</div>';
+                console.error(error);
+                document.getElementById('messagesContainer').innerHTML = '<div class="empty-state">⚠️ Ошибка загрузки</div>';
             }
         }
         
-        function addCommentToDOM(comment) {
-            const container = document.getElementById('commentsList');
-            const time = new Date(comment.created_at).toLocaleString('ru-RU');
+        function addMessageToDOM(comment) {
+            const container = document.getElementById('messagesContainer');
+            const time = new Date(comment.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
             const avatarColor = comment.avatar_color || getAvatarColor(comment.username);
             const letter = (comment.username.charAt(0) || '?').toUpperCase();
             const isMine = comment.user_id === userId;
             const isLiked = comment.liked_by ? JSON.parse(comment.liked_by).includes(userId) : false;
             
             const div = document.createElement('div');
-            div.className = 'comment-card';
-            div.id = `comment-${comment.id}`;
+            div.className = 'message';
+            div.id = `msg-${comment.id}`;
             div.innerHTML = `
-                <div class="comment-header">
-                    <div class="comment-avatar" style="background: ${avatarColor}">${escapeHtml(letter)}</div>
-                    <div class="comment-content">
-                        <div class="comment-name-row">
-                            <span class="comment-name">${escapeHtml(comment.username)}</span>
-                            ${isMine ? '<span class="comment-badge">Вы</span>' : ''}
-                            <span class="comment-time">${time}</span>
+                <div class="message-avatar" style="background: ${avatarColor}">${escapeHtml(letter)}</div>
+                <div class="message-content">
+                    <div class="message-header">
+                        <span class="message-name">${escapeHtml(comment.username)}</span>
+                        ${isMine ? '<span class="message-badge">Вы</span>' : ''}
+                        <span class="message-time">${time}</span>
+                    </div>
+                    <div class="message-text">${comment.comment ? escapeHtml(comment.comment) : ''}</div>
+                    ${comment.media_data ? `
+                        <div class="message-media">
+                            ${comment.media_type === 'image' ? 
+                                `<img src="${comment.media_data}" onclick="viewMedia('${comment.media_data}')">` : 
+                                `<video controls src="${comment.media_data}" onclick="viewMedia('${comment.media_data}')"></video>`}
                         </div>
-                        <div class="comment-text">${escapeHtml(comment.comment)}</div>
-                        <div class="comment-actions">
-                            <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="likeComment(${comment.id})">❤️ ${comment.likes || 0}</button>
-                            <button class="reply-btn" onclick="setReply(${comment.id}, '${escapeHtml(comment.username)}')">💬 Ответить</button>
-                            ${isMine ? `<button class="edit-btn" onclick="editComment(${comment.id}, '${escapeHtml(comment.comment).replace(/'/g, "\\'")}')">✏️</button>` : ''}
-                            ${isMine ? `<button class="delete-btn" onclick="deleteComment(${comment.id})">🗑</button>` : ''}
-                        </div>
+                    ` : ''}
+                    <div class="message-actions">
+                        <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="likeComment(${comment.id})">❤️ ${comment.likes || 0}</button>
+                        <button class="reply-btn" onclick="setReply(${comment.id}, '${escapeHtml(comment.username)}')">💬 Ответить</button>
+                        ${isMine ? `<button onclick="editComment(${comment.id}, '${escapeHtml(comment.comment || '').replace(/'/g, "\\'")}')">✏️</button>` : ''}
+                        ${isMine ? `<button onclick="deleteComment(${comment.id})">🗑</button>` : ''}
                     </div>
                 </div>
             `;
             container.appendChild(div);
         }
         
-        function addReplyToDOM(reply, parentId) {
-            const parentDiv = document.getElementById(`comment-${parentId}`);
-            if (!parentDiv) return;
-            
-            let repliesContainer = parentDiv.querySelector('.replies-container');
-            if (!repliesContainer) {
-                repliesContainer = document.createElement('div');
-                repliesContainer.className = 'comment-reply replies-container';
-                parentDiv.appendChild(repliesContainer);
-                
-                // Добавляем счетчик ответов
-                const replyCountSpan = document.createElement('span');
-                replyCountSpan.className = 'reply-count';
-                replyCountSpan.textContent = '▼ показать ответы';
-                replyCountSpan.onclick = () => toggleReplies(repliesContainer, replyCountSpan);
-                parentDiv.appendChild(replyCountSpan);
-            }
-            
-            const time = new Date(reply.created_at).toLocaleString('ru-RU');
+        function addReplyToContainer(container, reply) {
+            const time = new Date(reply.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
             const avatarColor = reply.avatar_color || getAvatarColor(reply.username);
             const letter = (reply.username.charAt(0) || '?').toUpperCase();
             const isMine = reply.user_id === userId;
             const isLiked = reply.liked_by ? JSON.parse(reply.liked_by).includes(userId) : false;
             
-            const replyDiv = document.createElement('div');
-            replyDiv.className = 'comment-card';
-            replyDiv.id = `comment-${reply.id}`;
-            replyDiv.innerHTML = `
-                <div class="comment-header">
-                    <div class="comment-avatar" style="background: ${avatarColor}">${escapeHtml(letter)}</div>
-                    <div class="comment-content">
-                        <div class="comment-name-row">
-                            <span class="comment-name">${escapeHtml(reply.username)}</span>
-                            ${isMine ? '<span class="comment-badge">Вы</span>' : ''}
-                            <span class="comment-time">${time}</span>
+            const div = document.createElement('div');
+            div.className = 'message';
+            div.id = `msg-${reply.id}`;
+            div.style.marginTop = '8px';
+            div.innerHTML = `
+                <div class="message-avatar" style="background: ${avatarColor}">${escapeHtml(letter)}</div>
+                <div class="message-content">
+                    <div class="message-header">
+                        <span class="message-name">${escapeHtml(reply.username)}</span>
+                        ${isMine ? '<span class="message-badge">Вы</span>' : ''}
+                        <span class="message-time">${time}</span>
+                    </div>
+                    <div class="message-text">${reply.comment ? escapeHtml(reply.comment) : ''}</div>
+                    ${reply.media_data ? `
+                        <div class="message-media">
+                            ${reply.media_type === 'image' ? 
+                                `<img src="${reply.media_data}" onclick="viewMedia('${reply.media_data}')">` : 
+                                `<video controls src="${reply.media_data}" onclick="viewMedia('${reply.media_data}')"></video>`}
                         </div>
-                        <div class="comment-text">${escapeHtml(reply.comment)}</div>
-                        <div class="comment-actions">
-                            <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="likeComment(${reply.id})">❤️ ${reply.likes || 0}</button>
-                            <button class="reply-btn" onclick="setReply(${reply.id}, '${escapeHtml(reply.username)}')">💬 Ответить</button>
-                            ${isMine ? `<button class="edit-btn" onclick="editComment(${reply.id}, '${escapeHtml(reply.comment).replace(/'/g, "\\'")}')">✏️</button>` : ''}
-                            ${isMine ? `<button class="delete-btn" onclick="deleteComment(${reply.id})">🗑</button>` : ''}
-                        </div>
+                    ` : ''}
+                    <div class="message-actions">
+                        <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="likeComment(${reply.id})">❤️ ${reply.likes || 0}</button>
+                        <button class="reply-btn" onclick="setReply(${reply.id}, '${escapeHtml(reply.username)}')">💬 Ответить</button>
+                        ${isMine ? `<button onclick="editComment(${reply.id}, '${escapeHtml(reply.comment || '').replace(/'/g, "\\'")}')">✏️</button>` : ''}
+                        ${isMine ? `<button onclick="deleteComment(${reply.id})">🗑</button>` : ''}
                     </div>
                 </div>
             `;
-            repliesContainer.appendChild(replyDiv);
+            container.appendChild(div);
         }
         
-        function toggleReplies(container, btn) {
-            if (container.style.display === 'none') {
-                container.style.display = 'block';
-                btn.textContent = '▲ скрыть ответы';
+        function toggleReplies(parentId, toggleBtn) {
+            const repliesDiv = document.getElementById(`replies-${parentId}`);
+            if (repliesDiv.style.display === 'none') {
+                repliesDiv.style.display = 'block';
+                toggleBtn.textContent = toggleBtn.textContent.replace('▼', '▲');
             } else {
-                container.style.display = 'none';
-                btn.textContent = '▼ показать ответы';
+                repliesDiv.style.display = 'none';
+                toggleBtn.textContent = toggleBtn.textContent.replace('▲', '▼');
             }
         }
         
@@ -626,7 +603,7 @@ HTML = """
             replyToName = name;
             document.getElementById('replyIndicator').style.display = 'flex';
             document.getElementById('replyToName').textContent = name;
-            document.getElementById('commentText').focus();
+            messageInput.focus();
         }
         
         function cancelReply() {
@@ -635,30 +612,24 @@ HTML = """
             document.getElementById('replyIndicator').style.display = 'none';
         }
         
-        async function sendComment() {
-            const username = userName.trim();
-            const comment = commentText.value.trim();
-            
-            if (!username) {
-                showStatus('❌ Введите ваше имя', 'error');
-                document.getElementById('username').focus();
-                return;
-            }
-            if (!comment) {
-                showStatus('❌ Введите комментарий', 'error');
-                commentText.focus();
+        async function sendMessage() {
+            const text = messageInput.value.trim();
+            if (!text && !pendingMedia) {
+                showStatus('Напишите сообщение', 'error');
                 return;
             }
             
             const data = {
                 post_id: postId,
                 user_id: userId,
-                username: username,
-                comment: comment
+                username: userName,
+                comment: text || ''
             };
             
-            if (replyToId) {
-                data.parent_id = replyToId;
+            if (replyToId) data.parent_id = replyToId;
+            if (pendingMedia) {
+                data.media_type = pendingMediaType;
+                data.media_data = pendingMedia;
             }
             
             try {
@@ -669,80 +640,73 @@ HTML = """
                 });
                 
                 if (response.ok) {
-                    showStatus('✅ Комментарий отправлен!', 'success');
-                    commentText.value = '';
-                    commentText.style.height = 'auto';
+                    messageInput.value = '';
+                    messageInput.style.height = 'auto';
+                    pendingMedia = null;
+                    pendingMediaType = null;
                     cancelReply();
-                    await loadComments();
+                    await loadMessages();
                     setTimeout(() => {
                         if (window.Maxi && window.Maxi.close) window.Maxi.close();
-                    }, 1500);
+                    }, 1000);
                 } else {
-                    showStatus('❌ Ошибка отправки', 'error');
+                    showStatus('Ошибка отправки', 'error');
                 }
             } catch (error) {
-                showStatus('❌ Ошибка соединения', 'error');
+                showStatus('Ошибка соединения', 'error');
             }
         }
         
-        async function likeComment(commentId) {
+        async function likeComment(id) {
             try {
-                const response = await fetch(`/api/comment/${commentId}/like`, {
+                await fetch(`/api/comment/${id}/like`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user_id: userId })
                 });
-                if (response.ok) {
-                    loadComments();
-                }
-            } catch (error) {
-                console.error('Ошибка лайка:', error);
-            }
+                loadMessages();
+            } catch(e) { console.error(e); }
         }
         
-        async function editComment(commentId, oldText) {
-            const newText = prompt('Редактировать комментарий:', oldText);
+        async function editComment(id, oldText) {
+            const newText = prompt('Редактировать сообщение:', oldText);
             if (newText && newText.trim() !== '') {
                 try {
-                    const response = await fetch(`/api/comment/${commentId}`, {
+                    await fetch(`/api/comment/${id}`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ comment: newText.trim(), user_id: userId })
                     });
-                    if (response.ok) {
-                        loadComments();
-                        showStatus('✏️ Комментарий обновлен', 'success');
-                    }
-                } catch (error) {
-                    showStatus('❌ Ошибка редактирования', 'error');
-                }
+                    loadMessages();
+                } catch(e) { showStatus('Ошибка', 'error'); }
             }
         }
         
-        async function deleteComment(commentId) {
-            if (!confirm('Удалить комментарий?')) return;
+        async function deleteComment(id) {
+            if (!confirm('Удалить сообщение?')) return;
             try {
-                const response = await fetch(`/api/comment/${commentId}`, {
+                await fetch(`/api/comment/${id}`, {
                     method: 'DELETE',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user_id: userId })
                 });
-                if (response.ok) {
-                    loadComments();
-                    showStatus('🗑 Комментарий удален', 'success');
-                }
-            } catch (error) {
-                showStatus('❌ Ошибка удаления', 'error');
-            }
+                loadMessages();
+            } catch(e) { showStatus('Ошибка', 'error'); }
         }
         
-        function showStatus(message, type) {
-            const statusDiv = document.getElementById('status');
-            statusDiv.textContent = message;
-            statusDiv.classList.add('show');
-            setTimeout(() => {
-                statusDiv.classList.remove('show');
-            }, 2000);
+        function viewMedia(url) {
+            window.open(url, '_blank');
+        }
+        
+        function closeApp() {
+            if (window.Maxi && window.Maxi.close) window.Maxi.close();
+        }
+        
+        function showStatus(msg, type) {
+            const div = document.getElementById('status');
+            div.textContent = msg;
+            div.classList.add('show');
+            setTimeout(() => div.classList.remove('show'), 2000);
         }
         
         function escapeHtml(text) {
@@ -751,9 +715,8 @@ HTML = """
             return div.innerHTML;
         }
         
-        // Запуск
-        loadComments();
-        setInterval(loadComments, 5000);
+        loadMessages();
+        setInterval(loadMessages, 5000);
     </script>
 </body>
 </html>
@@ -769,10 +732,8 @@ def get_comments(post_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
-        SELECT id, parent_id, user_id, username, comment, likes, liked_by, created_at, updated_at 
-        FROM comments 
-        WHERE post_id = ? 
-        ORDER BY created_at ASC
+        SELECT id, parent_id, user_id, username, comment, media_type, media_data, likes, liked_by, created_at
+        FROM comments WHERE post_id = ? ORDER BY created_at ASC
     """, (post_id,))
     rows = c.fetchall()
     conn.close()
@@ -784,11 +745,12 @@ def get_comments(post_id):
             "parent_id": r[1] or 0,
             "user_id": r[2],
             "username": r[3],
-            "comment": r[4],
-            "likes": r[5],
-            "liked_by": r[6],
-            "created_at": r[7],
-            "updated_at": r[8]
+            "comment": r[4] or "",
+            "media_type": r[5],
+            "media_data": r[6],
+            "likes": r[7],
+            "liked_by": r[8],
+            "created_at": r[9]
         })
     return jsonify({"comments": comments})
 
@@ -798,14 +760,16 @@ def add_comment():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
-        INSERT INTO comments (post_id, parent_id, user_id, username, comment, created_at, liked_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO comments (post_id, parent_id, user_id, username, comment, media_type, media_data, created_at, liked_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data["post_id"],
         data.get("parent_id", 0),
         data["user_id"],
         data["username"],
-        data["comment"],
+        data.get("comment", ""),
+        data.get("media_type"),
+        data.get("media_data"),
         datetime.now().isoformat(),
         "[]"
     ))
@@ -817,23 +781,18 @@ def add_comment():
 def like_comment(id):
     data = request.get_json()
     user_id = data.get("user_id")
-    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT liked_by FROM comments WHERE id = ?", (id,))
     row = c.fetchone()
-    
     if row:
         liked_by = eval(row[0]) if row[0] else []
         if user_id in liked_by:
             liked_by.remove(user_id)
         else:
             liked_by.append(user_id)
-        
-        c.execute("UPDATE comments SET likes = ?, liked_by = ? WHERE id = ?", 
-                  (len(liked_by), str(liked_by), id))
+        c.execute("UPDATE comments SET likes = ?, liked_by = ? WHERE id = ?", (len(liked_by), str(liked_by), id))
         conn.commit()
-    
     conn.close()
     return jsonify({"ok": True})
 
