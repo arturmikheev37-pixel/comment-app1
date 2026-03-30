@@ -6,6 +6,7 @@ import os
 import sqlite3
 import uuid
 from urllib.parse import parse_qsl
+from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, render_template_string, request, send_from_directory
 from werkzeug.utils import secure_filename
@@ -16,6 +17,7 @@ BASE_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(BASE_DIR, "comments.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "f9LHodD0cOIdrNPjh3CWiZlW8bj-DhNpjF6VBTWDQP66-wijDIChpbtLyNZeZOtubmx3thZhMxQe7j8oXnCq").strip()
+BOT_USERNAME = os.getenv("MAX_BOT_USERNAME", "id250300578953_1_bot").strip()
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 
@@ -199,6 +201,49 @@ def get_post_info(post_id: str) -> dict | None:
     }
 
 
+def refresh_post_button(post_id: str):
+    post = get_post_info(post_id)
+    if not post or not post.get("source_post_id"):
+        return
+
+    conn = get_db_connection()
+    count_row = conn.execute("SELECT COUNT(*) AS count FROM comments WHERE post_id = ?", (post_id,)).fetchone()
+    conn.close()
+    count = count_row["count"] if count_row else 0
+    button_text = f"Комментарии ({count})" if count else "Открыть комментарии"
+
+    payload = {
+        "text": post.get("post_text", ""),
+        "notify": True,
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {
+                    "buttons": [[
+                        {
+                            "type": "link",
+                            "text": button_text,
+                            "url": f"https://max.ru/{BOT_USERNAME}?startapp={post_id}",
+                        }
+                    ]]
+                }
+            }
+        ],
+    }
+
+    try:
+        req = Request(
+            url=f"https://botapi.max.ru/messages?access_token={BOT_TOKEN}&message_id={post['source_post_id']}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="PUT",
+        )
+        with urlopen(req, timeout=10) as response:
+            response.read()
+    except Exception as error:
+        print(f"Не удалось обновить кнопку комментариев для {post_id[:32]}: {error}")
+
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -276,8 +321,8 @@ HTML_TEMPLATE = """
         }
 
         .post-card {
-            margin: 12px;
-            padding: 12px 14px;
+            margin: 10px 12px 8px;
+            padding: 10px 12px;
             border-radius: 18px;
             background: rgba(23, 33, 43, 0.94);
             border: 1px solid var(--tg-panel-border);
@@ -306,10 +351,10 @@ HTML_TEMPLATE = """
 
         .feed {
             flex: 1;
-            padding: 4px 12px 96px;
+            padding: 2px 12px 92px;
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 8px;
         }
 
         .message-thread {
@@ -319,7 +364,7 @@ HTML_TEMPLATE = """
         }
 
         .message-thread.reply {
-            margin-left: 40px;
+            margin-left: 28px;
         }
 
         .message-row {
@@ -347,7 +392,7 @@ HTML_TEMPLATE = """
 
         .bubble {
             max-width: min(85%, 560px);
-            padding: 10px 12px 8px;
+            padding: 9px 11px 8px;
             border-radius: 18px 18px 18px 6px;
             background: var(--tg-incoming);
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
@@ -374,6 +419,11 @@ HTML_TEMPLATE = """
             border-radius: 10px;
             font-size: 12px;
             color: #c9def2;
+            cursor: pointer;
+        }
+
+        .reply-pill:hover {
+            background: rgba(255, 255, 255, 0.08);
         }
 
         .message-text {
@@ -418,15 +468,15 @@ HTML_TEMPLATE = """
             bottom: 0;
             transform: translateX(-50%);
             width: min(760px, 100%);
-            padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+            padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
             background: linear-gradient(to top, rgba(14, 22, 33, 0.98), rgba(14, 22, 33, 0.74));
         }
 
         .composer-card {
             background: rgba(23, 33, 43, 0.96);
             border: 1px solid var(--tg-panel-border);
-            border-radius: 20px;
-            padding: 8px;
+            border-radius: 18px;
+            padding: 6px;
             box-shadow: 0 12px 34px rgba(0, 0, 0, 0.28);
         }
 
@@ -446,14 +496,14 @@ HTML_TEMPLATE = """
 
         textarea {
             width: 100%;
-            min-height: 44px;
-            max-height: 120px;
-            resize: vertical;
+            min-height: 40px;
+            max-height: 96px;
+            resize: none;
             background: #223140;
             border: 1px solid transparent;
             color: white;
-            border-radius: 16px;
-            padding: 10px 12px;
+            border-radius: 15px;
+            padding: 9px 12px;
             outline: none;
             font: inherit;
             font-size: 14px;
@@ -465,7 +515,7 @@ HTML_TEMPLATE = """
         }
 
         .attachment-row {
-            margin-top: 6px;
+            margin-top: 4px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -504,7 +554,7 @@ HTML_TEMPLATE = """
         }
 
         .composer-actions {
-            margin-top: 6px;
+            margin-top: 4px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -531,8 +581,8 @@ HTML_TEMPLATE = """
             color: white;
             font: inherit;
             font-weight: 700;
-            border-radius: 16px;
-            padding: 8px 14px;
+            border-radius: 15px;
+            padding: 8px 12px;
             cursor: pointer;
         }
 
@@ -572,6 +622,33 @@ HTML_TEMPLATE = """
 
         .context-menu button:hover {
             background: rgba(255, 255, 255, 0.08);
+        }
+
+        .scroll-down {
+            position: fixed;
+            right: max(12px, calc((100vw - min(760px, 100vw)) / 2 + 12px));
+            bottom: calc(86px + env(safe-area-inset-bottom));
+            width: 42px;
+            height: 42px;
+            border: none;
+            border-radius: 50%;
+            background: rgba(46, 166, 255, 0.92);
+            color: white;
+            font-size: 18px;
+            cursor: pointer;
+            box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+            display: none;
+            z-index: 20;
+        }
+
+        .scroll-down.show {
+            display: block;
+        }
+
+        .jump-highlight {
+            outline: 2px solid rgba(46, 166, 255, 0.95);
+            box-shadow: 0 0 0 6px rgba(46, 166, 255, 0.18);
+            transition: box-shadow 0.3s ease, outline-color 0.3s ease;
         }
 
         @media (max-width: 640px) {
@@ -635,6 +712,7 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="context-menu" id="contextMenu"></div>
+    <button class="scroll-down" id="scrollDownBtn" type="button">↓</button>
 
     <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
@@ -652,6 +730,7 @@ HTML_TEMPLATE = """
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
         const contextMenu = document.getElementById("contextMenu");
+        const scrollDownBtn = document.getElementById("scrollDownBtn");
 
         let initData = "";
         let postId = "";
@@ -662,6 +741,7 @@ HTML_TEMPLATE = """
         let latestComments = [];
         let menuCommentId = null;
         let longPressTimer = null;
+        let wasNearBottom = true;
 
         function resolveWebAppObject() {
             if (window.WebApp) return window.WebApp;
@@ -678,6 +758,32 @@ HTML_TEMPLATE = """
         function showStatus(message, type) {
             status.textContent = message;
             status.className = "status " + type;
+        }
+
+        function isNearBottom() {
+            return window.innerHeight + window.scrollY >= document.body.offsetHeight - 140;
+        }
+
+        function updateScrollDownButton() {
+            if (isNearBottom()) {
+                scrollDownBtn.classList.remove("show");
+            } else {
+                scrollDownBtn.classList.add("show");
+            }
+        }
+
+        function scrollToBottom(force = false) {
+            if (force || isNearBottom()) {
+                window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+            }
+        }
+
+        function jumpToComment(commentId) {
+            const node = document.querySelector(`.bubble[data-comment-id="${commentId}"]`);
+            if (!node) return;
+            node.scrollIntoView({ behavior: "smooth", block: "center" });
+            node.classList.add("jump-highlight");
+            setTimeout(() => node.classList.remove("jump-highlight"), 1300);
         }
 
         function formatDate(value) {
@@ -770,7 +876,7 @@ HTML_TEMPLATE = """
             const initial = escapeHtml((comment.username || "?").charAt(0).toUpperCase());
             const imageHtml = comment.image_url ? `<img class="message-image" src="${comment.image_url}" alt="comment image">` : "";
             const editedHtml = comment.edited_at ? '<span>изменено</span>' : "";
-            const parentPreview = comment.parent_preview ? `<div class="reply-pill">Ответ для ${escapeHtml(comment.parent_preview.username)}: ${escapeHtml(comment.parent_preview.comment)}</div>` : "";
+            const parentPreview = comment.parent_preview ? `<div class="reply-pill" onclick="jumpToComment(${comment.parent_id})">Ответ для ${escapeHtml(comment.parent_preview.username)}: ${escapeHtml(comment.parent_preview.comment)}</div>` : "";
             const replies = (replyMap[comment.id] || []).map((child) => `<div class="message-thread reply">${renderCommentNode(child, replyMap)}</div>`).join("");
             return `
                 <div class="message-thread">
@@ -794,9 +900,11 @@ HTML_TEMPLATE = """
         }
 
         function renderComments(comments) {
+            const keepBottom = wasNearBottom;
             latestComments = comments || [];
             if (!latestComments.length) {
                 commentsList.innerHTML = '<div class="empty">Пока нет комментариев. Можно написать первый.</div>';
+                updateScrollDownButton();
                 return;
             }
 
@@ -813,6 +921,12 @@ HTML_TEMPLATE = """
             });
 
             commentsList.innerHTML = roots.map((comment) => renderCommentNode(comment, replyMap)).join("");
+            requestAnimationFrame(() => {
+                if (keepBottom) {
+                    scrollToBottom(true);
+                }
+                updateScrollDownButton();
+            });
         }
 
         async function loadComments() {
@@ -822,6 +936,7 @@ HTML_TEMPLATE = """
             }
 
             try {
+                wasNearBottom = isNearBottom();
                 const url = new URL("/api/comments/" + encodeURIComponent(postId), window.location.origin);
                 if (initData) url.searchParams.set("init_data", initData);
                 const response = await fetch(url);
@@ -1033,6 +1148,8 @@ HTML_TEMPLATE = """
                     closeContextMenu();
                 }
             });
+            window.addEventListener("scroll", updateScrollDownButton, { passive: true });
+            scrollDownBtn.addEventListener("click", () => scrollToBottom(true));
 
             await loadComments();
             setInterval(loadComments, 8000);
@@ -1041,6 +1158,7 @@ HTML_TEMPLATE = """
         window.menuReply = menuReply;
         window.menuEdit = menuEdit;
         window.menuDelete = menuDelete;
+        window.jumpToComment = jumpToComment;
         boot();
     </script>
 </body>
@@ -1154,6 +1272,7 @@ def add_comment():
     conn.commit()
     comment_id = cursor.lastrowid
     conn.close()
+    refresh_post_button(post_id)
 
     return jsonify({"status": "success", "comment": {"id": comment_id}})
 
@@ -1194,7 +1313,7 @@ def delete_comment(comment_id):
         return jsonify({"error": "Не передан user_id"}), 400
 
     conn = get_db_connection()
-    row = conn.execute("SELECT image_path FROM comments WHERE id = ? AND user_id = ?", (comment_id, user_id)).fetchone()
+    row = conn.execute("SELECT post_id, image_path FROM comments WHERE id = ? AND user_id = ?", (comment_id, user_id)).fetchone()
     if not row:
         conn.close()
         return jsonify({"error": "Комментарий не найден или нет прав"}), 404
@@ -1207,6 +1326,7 @@ def delete_comment(comment_id):
         file_path = os.path.join(UPLOAD_DIR, row["image_path"])
         if os.path.exists(file_path):
             os.remove(file_path)
+    refresh_post_button(row["post_id"])
     return jsonify({"status": "success"})
 
 
