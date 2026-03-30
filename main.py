@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
+import hashlib
+import hmac
+import json
 import os
 import sqlite3
-from urllib.parse import quote
+from urllib.parse import parse_qsl
 
 from flask import Flask, jsonify, render_template_string, request
 
@@ -9,6 +12,7 @@ app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(BASE_DIR, "comments.db")
+BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "f9LHodD0cOIdrNPjh3CWiZlW8bj-DhNpjF6VBTWDQP66-wijDIChpbtLyNZeZOtubmx3thZhMxQe7j8oXnCq").strip()
 
 
 def get_db_connection():
@@ -36,42 +40,26 @@ def init_db():
     columns = {row["name"] for row in cursor.execute("PRAGMA table_info(comments)").fetchall()}
     if "post_id" not in columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN post_id TEXT")
-        cursor.execute("UPDATE comments SET post_id = id WHERE post_id IS NULL OR TRIM(post_id) = ''")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_comments_post_created ON comments (post_id, created_at DESC)")
-    else:
-        cursor.execute(
-            """
-            UPDATE comments
-            SET post_id = id
-            WHERE post_id IS NULL OR TRIM(post_id) = '' OR post_id = 'global'
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_comments_post_created
-            ON comments (post_id, created_at DESC)
-            """
-        )
 
+    cursor.execute(
+        """
+        UPDATE comments
+        SET post_id = CAST(id AS TEXT)
+        WHERE post_id IS NULL OR TRIM(post_id) = '' OR post_id = 'global'
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_comments_post_created
+        ON comments (post_id, created_at DESC)
+        """
+    )
     conn.commit()
     conn.close()
 
 
 def normalize_post_id(raw_post_id: str | None) -> str:
-    value = (raw_post_id or "").strip()
-    return value[:128]
-
-
-def require_post_id(raw_post_id: str | None) -> str:
-    post_id = normalize_post_id(raw_post_id)
-    if not post_id:
-        raise ValueError("Не передан post_id")
-    return post_id
-
-
-def normalize_username(raw_username: str | None) -> str:
-    value = (raw_username or "").strip()
-    return value[:50] if value else "Гость"
+    return (raw_post_id or "").strip()[:128]
 
 
 def normalize_comment(raw_comment: str | None) -> str:
@@ -87,6 +75,53 @@ def serialize_comment(row: sqlite3.Row) -> dict:
         "comment": row["comment"],
         "created_at": row["created_at"],
     }
+
+
+def parse_max_user(raw_user: str | dict | None) -> dict | None:
+    if not raw_user:
+        return None
+    if isinstance(raw_user, dict):
+        user = raw_user
+    else:
+        try:
+            user = json.loads(raw_user)
+        except json.JSONDecodeError:
+            return None
+
+    first_name = (user.get("first_name") or "").strip()
+    last_name = (user.get("last_name") or "").strip()
+    username = " ".join(part for part in [first_name, last_name] if part).strip()
+    if not username:
+        username = (user.get("username") or "Пользователь MAX").strip()
+
+    user_id = str(user.get("user_id") or user.get("id") or "").strip()
+    if not user_id:
+        return None
+
+    return {
+        "user_id": user_id[:128],
+        "username": username[:50] or "Пользователь MAX",
+    }
+
+
+def validate_max_init_data(init_data: str) -> dict | None:
+    if not init_data or not BOT_TOKEN:
+        return None
+
+    pairs = parse_qsl(init_data, keep_blank_values=True)
+    values = dict(pairs)
+    received_hash = values.pop("hash", "")
+    if not received_hash:
+        return None
+
+    data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(values.items()))
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        return None
+
+    return parse_max_user(values.get("user"))
 
 
 HTML_TEMPLATE = """
@@ -106,7 +141,6 @@ HTML_TEMPLATE = """
             --tg-accent: #2ea6ff;
             --tg-text: #ffffff;
             --tg-muted: #8e9aa5;
-            --tg-danger: #ff5959;
         }
 
         * {
@@ -136,7 +170,6 @@ HTML_TEMPLATE = """
             min-height: 100vh;
             display: flex;
             flex-direction: column;
-            backdrop-filter: blur(2px);
         }
 
         .topbar {
@@ -189,7 +222,7 @@ HTML_TEMPLATE = """
             text-align: center;
             color: var(--tg-muted);
             font-size: 13px;
-            max-width: 420px;
+            max-width: 460px;
             line-height: 1.5;
         }
 
@@ -214,7 +247,6 @@ HTML_TEMPLATE = """
             color: white;
             font-weight: 700;
             flex-shrink: 0;
-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24);
         }
 
         .bubble {
@@ -242,7 +274,6 @@ HTML_TEMPLATE = """
             word-break: break-word;
             font-size: 14px;
             line-height: 1.45;
-            color: var(--tg-text);
         }
 
         .message-meta {
@@ -290,28 +321,15 @@ HTML_TEMPLATE = """
         }
 
         .identity {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 8px;
-        }
-
-        .identity input {
             width: 100%;
             background: #223140;
-            border: 1px solid transparent;
-            color: white;
             border-radius: 16px;
             padding: 10px 12px;
-            outline: none;
-            font: inherit;
+            margin-bottom: 8px;
+            font-size: 14px;
         }
 
-        .identity input:focus,
-        .composer-card textarea:focus {
-            border-color: rgba(46, 166, 255, 0.7);
-        }
-
-        .composer-card textarea {
+        textarea {
             width: 100%;
             min-height: 62px;
             max-height: 180px;
@@ -324,6 +342,10 @@ HTML_TEMPLATE = """
             outline: none;
             font: inherit;
             line-height: 1.4;
+        }
+
+        textarea:focus {
+            border-color: rgba(46, 166, 255, 0.7);
         }
 
         .composer-actions {
@@ -374,10 +396,6 @@ HTML_TEMPLATE = """
                 max-width: calc(100% - 44px);
             }
 
-            .identity {
-                flex-direction: column;
-            }
-
             .composer-actions {
                 align-items: flex-start;
                 flex-direction: column;
@@ -396,19 +414,17 @@ HTML_TEMPLATE = """
                 <span class="title-dot"></span>
                 <span>Комментарии</span>
             </div>
-            <div class="subtitle" id="postLabel"></div>
+            <div class="subtitle" id="postLabel">Загрузка контекста поста...</div>
         </header>
 
         <main class="feed" id="commentsList">
-            <div class="welcome">Обсуждение открыто только для этого поста. Комментарии из других публикаций здесь не показываются.</div>
+            <div class="welcome">Мини-приложение открыто внутри MAX. Имя автора берётся из профиля MAX, а комментарии привязаны к `startapp` текущего поста.</div>
         </main>
     </div>
 
     <div class="composer">
         <div class="composer-card">
-            <div class="identity">
-                <input id="username" maxlength="50" placeholder="Ваше имя">
-            </div>
+            <div class="identity" id="identity">Автор: определяем профиль MAX...</div>
             <textarea id="comment" maxlength="1000" placeholder="Написать комментарий..."></textarea>
             <div class="composer-actions">
                 <div>
@@ -421,58 +437,23 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        const initialPostId = {{ post_id|tojson }};
-        const initialUsername = {{ username|tojson }};
-        const initialUserId = {{ user_id|tojson }};
-
-        function resolvePostId() {
-            const params = new URLSearchParams(window.location.search);
-            const parts = window.location.pathname.split("/").filter(Boolean);
-            if (parts[0] === "post" && parts[1]) return decodeURIComponent(parts[1]);
-            return (params.get("post_id") || params.get("startapp") || initialPostId || "").trim();
-        }
-
-        const postId = resolvePostId();
-        const usernameInput = document.getElementById("username");
-        const commentInput = document.getElementById("comment");
+        const webApp = window.WebApp || window.Maxi || null;
         const commentsList = document.getElementById("commentsList");
+        const postLabel = document.getElementById("postLabel");
+        const identity = document.getElementById("identity");
+        const commentInput = document.getElementById("comment");
         const charCount = document.getElementById("charCount");
         const status = document.getElementById("status");
         const submitBtn = document.getElementById("submitBtn");
 
-        let userId = (initialUserId || localStorage.getItem("max_comment_user_id") || "").trim();
-        if (!userId) {
-            userId = "user_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
-            localStorage.setItem("max_comment_user_id", userId);
-        }
+        let initData = "";
+        let postId = "";
+        let currentUser = null;
 
-        let username = (initialUsername || localStorage.getItem("max_comment_username") || "").trim();
-        usernameInput.value = username;
-        document.getElementById("postLabel").textContent = postId
-            ? "Пост: " + postId
-            : "Не удалось определить пост. Откройте комментарии из кнопки под публикацией.";
-
-        usernameInput.addEventListener("input", () => {
-            username = usernameInput.value.trim();
-            localStorage.setItem("max_comment_username", username);
-        });
-
-        commentInput.addEventListener("input", () => {
-            charCount.textContent = commentInput.value.length;
-        });
-
-        commentInput.addEventListener("keydown", (event) => {
-            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                event.preventDefault();
-                sendComment();
-            }
-        });
-
-        submitBtn.addEventListener("click", sendComment);
-
-        function showStatus(message, type) {
-            status.textContent = message;
-            status.className = "status " + type;
+        function resolveWebAppObject() {
+            if (window.WebApp) return window.WebApp;
+            if (window.Telegram && window.Telegram.WebApp) return window.Telegram.WebApp;
+            return window.Maxi || null;
         }
 
         function escapeHtml(text) {
@@ -481,24 +462,74 @@ HTML_TEMPLATE = """
             return div.innerHTML;
         }
 
+        function showStatus(message, type) {
+            status.textContent = message;
+            status.className = "status " + type;
+        }
+
         function formatDate(value) {
             try {
-                const date = new Date(value);
-                return date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+                return new Date(value).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
             } catch (error) {
                 return "";
             }
         }
 
+        function getStartParam(appInstance) {
+            if (!appInstance) return "";
+            if (appInstance.initDataUnsafe && appInstance.initDataUnsafe.start_param) {
+                return String(appInstance.initDataUnsafe.start_param).trim();
+            }
+            if (appInstance.startParam) {
+                return String(appInstance.startParam).trim();
+            }
+            const params = new URLSearchParams(window.location.search);
+            return (params.get("startapp") || params.get("post_id") || "").trim();
+        }
+
+        function getMaxUser(appInstance) {
+            if (!appInstance) return null;
+            const rawUser = (appInstance.initDataUnsafe && appInstance.initDataUnsafe.user) || appInstance.user || null;
+            if (!rawUser) return null;
+
+            const firstName = (rawUser.first_name || rawUser.firstName || "").trim();
+            const lastName = (rawUser.last_name || rawUser.lastName || "").trim();
+            const username = [firstName, lastName].filter(Boolean).join(" ").trim() || rawUser.username || "Пользователь MAX";
+            const userId = String(rawUser.user_id || rawUser.id || "").trim();
+            if (!userId) return null;
+
+            return {
+                user_id: userId,
+                username: username
+            };
+        }
+
+        async function hydrateUserFromServer() {
+            if (!initData) return;
+            try {
+                const response = await fetch("/api/max/session", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ init_data: initData })
+                });
+                const data = await response.json();
+                if (response.ok && data.user) {
+                    currentUser = data.user;
+                }
+            } catch (error) {
+                console.error(error);
+            }
+        }
+
         function renderComments(comments) {
-            const welcome = '<div class="welcome">Обсуждение открыто только для этого поста. Комментарии из других публикаций здесь не показываются.</div>';
+            const welcome = '<div class="welcome">Это именно mini app внутри MAX. Для другого поста будет другой `startapp`, поэтому комментарии не смешиваются.</div>';
             if (!comments.length) {
                 commentsList.innerHTML = welcome + '<div class="empty">Пока нет комментариев. Можно написать первый.</div>';
                 return;
             }
 
             commentsList.innerHTML = welcome + comments.reverse().map((comment) => {
-                const mine = comment.user_id === userId;
+                const mine = currentUser && comment.user_id === currentUser.user_id;
                 const initial = escapeHtml((comment.username || "?").charAt(0).toUpperCase());
                 return `
                     <div class="message-row ${mine ? "mine" : ""}">
@@ -515,13 +546,11 @@ HTML_TEMPLATE = """
                     </div>
                 `;
             }).join("");
-
-            window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
         }
 
         async function loadComments() {
             if (!postId) {
-                commentsList.innerHTML = '<div class="empty">Нет `post_id`. Нужно открывать страницу из кнопки нужного поста.</div>';
+                commentsList.innerHTML = '<div class="empty">Не найден `startapp` от MAX. Открывайте приложение кнопкой мини-приложения, а не прямым URL.</div>';
                 return;
             }
 
@@ -536,16 +565,14 @@ HTML_TEMPLATE = """
         }
 
         async function sendComment() {
-            const currentUsername = usernameInput.value.trim();
             const comment = commentInput.value.trim();
 
             if (!postId) {
-                showStatus("Не найден post_id", "error");
+                showStatus("MAX не передал startapp", "error");
                 return;
             }
-            if (!currentUsername) {
-                showStatus("Введите имя", "error");
-                usernameInput.focus();
+            if (!currentUser || !currentUser.user_id) {
+                showStatus("Не удалось получить профиль пользователя из MAX", "error");
                 return;
             }
             if (!comment) {
@@ -563,15 +590,14 @@ HTML_TEMPLATE = """
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         post_id: postId,
-                        user_id: userId,
-                        username: currentUsername,
-                        comment: comment
+                        user_id: currentUser.user_id,
+                        username: currentUser.username,
+                        comment: comment,
+                        init_data: initData
                     })
                 });
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Ошибка отправки");
-
-                localStorage.setItem("max_comment_username", currentUsername);
                 commentInput.value = "";
                 charCount.textContent = "0";
                 showStatus("Комментарий отправлен", "success");
@@ -584,11 +610,12 @@ HTML_TEMPLATE = """
         }
 
         async function deleteComment(commentId) {
+            if (!currentUser) return;
             try {
                 const response = await fetch("/api/comment/" + commentId, {
                     method: "DELETE",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ user_id: userId })
+                    body: JSON.stringify({ user_id: currentUser.user_id })
                 });
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Ошибка удаления");
@@ -599,9 +626,45 @@ HTML_TEMPLATE = """
             }
         }
 
+        async function boot() {
+            const appInstance = resolveWebAppObject();
+            if (appInstance && typeof appInstance.ready === "function") {
+                appInstance.ready();
+            }
+            if (appInstance && typeof appInstance.expand === "function") {
+                appInstance.expand();
+            }
+
+            initData = (appInstance && appInstance.initData) || "";
+            postId = getStartParam(appInstance);
+            currentUser = getMaxUser(appInstance);
+            await hydrateUserFromServer();
+
+            postLabel.textContent = postId
+                ? "Пост: " + postId
+                : "Нет startapp. Если страница открыта как обычный URL, MAX данные не передаст.";
+
+            identity.textContent = currentUser
+                ? "Автор: " + currentUser.username
+                : "Автор: профиль MAX не найден";
+
+            commentInput.addEventListener("input", () => {
+                charCount.textContent = commentInput.value.length;
+            });
+            commentInput.addEventListener("keydown", (event) => {
+                if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                    event.preventDefault();
+                    sendComment();
+                }
+            });
+            submitBtn.addEventListener("click", sendComment);
+
+            await loadComments();
+            setInterval(loadComments, 8000);
+        }
+
         window.deleteComment = deleteComment;
-        loadComments();
-        setInterval(loadComments, 8000);
+        boot();
     </script>
 </body>
 </html>
@@ -610,43 +673,24 @@ HTML_TEMPLATE = """
 
 @app.route("/")
 def index():
-    post_id = normalize_post_id(request.args.get("post_id") or request.args.get("startapp"))
-    user_id = (request.args.get("user_id") or "").strip()[:128]
-    username = normalize_username(request.args.get("username"))
-    return render_template_string(HTML_TEMPLATE, post_id=post_id, user_id=user_id, username=username)
+    return render_template_string(HTML_TEMPLATE)
 
 
-@app.route("/post/<path:post_id>")
-def post_page(post_id):
-    user_id = (request.args.get("user_id") or "").strip()[:128]
-    username = normalize_username(request.args.get("username"))
-    return render_template_string(
-        HTML_TEMPLATE,
-        post_id=normalize_post_id(post_id),
-        user_id=user_id,
-        username=username,
-    )
-
-
-@app.route("/api/comments")
-def get_comments():
-    try:
-        post_id = require_post_id(request.args.get("post_id"))
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    return fetch_comments(post_id)
+@app.route("/api/max/session", methods=["POST"])
+def get_max_session():
+    payload = request.get_json(silent=True) or {}
+    user = validate_max_init_data(payload.get("init_data", ""))
+    if not user:
+        return jsonify({"error": "Не удалось проверить initData MAX"}), 400
+    return jsonify({"user": user})
 
 
 @app.route("/api/comments/<path:post_id>")
 def get_comments_by_post(post_id):
-    try:
-        normalized_post_id = require_post_id(post_id)
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    return fetch_comments(normalized_post_id)
+    normalized_post_id = normalize_post_id(post_id)
+    if not normalized_post_id:
+        return jsonify({"error": "Не передан post_id"}), 400
 
-
-def fetch_comments(post_id: str):
     conn = get_db_connection()
     rows = conn.execute(
         """
@@ -655,24 +699,20 @@ def fetch_comments(post_id: str):
         WHERE post_id = ?
         ORDER BY created_at DESC
         """,
-        (post_id,),
+        (normalized_post_id,),
     ).fetchall()
     conn.close()
-    return jsonify({"post_id": post_id, "comments": [serialize_comment(row) for row in rows]})
+    return jsonify({"post_id": normalized_post_id, "comments": [serialize_comment(row) for row in rows]})
 
 
 @app.route("/api/post_count/<path:post_id>")
 def get_post_count(post_id):
-    try:
-        normalized_post_id = require_post_id(post_id)
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
+    normalized_post_id = normalize_post_id(post_id)
+    if not normalized_post_id:
+        return jsonify({"error": "Не передан post_id"}), 400
 
     conn = get_db_connection()
-    row = conn.execute(
-        "SELECT COUNT(*) AS count FROM comments WHERE post_id = ?",
-        (normalized_post_id,),
-    ).fetchone()
+    row = conn.execute("SELECT COUNT(*) AS count FROM comments WHERE post_id = ?", (normalized_post_id,)).fetchone()
     conn.close()
     return jsonify({"post_id": normalized_post_id, "count": row["count"]})
 
@@ -680,18 +720,14 @@ def get_post_count(post_id):
 @app.route("/api/comment", methods=["POST"])
 def add_comment():
     payload = request.get_json(silent=True) or {}
-
-    try:
-        post_id = require_post_id(payload.get("post_id"))
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-
-    user_id = (payload.get("user_id") or "").strip()[:128]
-    username = normalize_username(payload.get("username"))
+    post_id = normalize_post_id(payload.get("post_id"))
     comment = normalize_comment(payload.get("comment"))
+    verified_user = validate_max_init_data(payload.get("init_data", ""))
 
-    if not user_id:
-        return jsonify({"error": "Не передан user_id"}), 400
+    if not post_id:
+        return jsonify({"error": "Не передан post_id"}), 400
+    if not verified_user:
+        return jsonify({"error": "Не удалось подтвердить пользователя MAX"}), 400
     if not comment:
         return jsonify({"error": "Комментарий пустой"}), 400
 
@@ -703,7 +739,7 @@ def add_comment():
         INSERT INTO comments (post_id, user_id, username, comment, created_at)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (post_id, user_id, username, comment, created_at),
+        (post_id, verified_user["user_id"], verified_user["username"], comment, created_at),
     )
     conn.commit()
     comment_id = cursor.lastrowid
@@ -715,8 +751,8 @@ def add_comment():
             "comment": {
                 "id": comment_id,
                 "post_id": post_id,
-                "user_id": user_id,
-                "username": username,
+                "user_id": verified_user["user_id"],
+                "username": verified_user["username"],
                 "comment": comment,
                 "created_at": created_at,
             },
@@ -742,22 +778,6 @@ def delete_comment(comment_id):
     if not deleted:
         return jsonify({"error": "Комментарий не найден или нет прав"}), 404
     return jsonify({"status": "success"})
-
-
-@app.route("/api/share_link/<path:post_id>")
-def share_link(post_id):
-    try:
-        normalized_post_id = require_post_id(post_id)
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-
-    base_url = request.host_url.rstrip("/")
-    return jsonify(
-        {
-            "post_id": normalized_post_id,
-            "web_app_url": f"{base_url}/post/{quote(normalized_post_id, safe='')}",
-        }
-    )
 
 
 @app.route("/health")
