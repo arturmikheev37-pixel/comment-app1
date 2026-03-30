@@ -18,7 +18,9 @@ DB_PATH = os.path.join(BASE_DIR, "comments.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "f9LHodD0cOIdrNPjh3CWiZlW8bj-DhNpjF6VBTWDQP66-wijDIChpbtLyNZeZOtubmx3thZhMxQe7j8oXnCq").strip()
 BOT_USERNAME = os.getenv("MAX_BOT_USERNAME", "id250300578953_1_bot").strip()
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".heic", ".heif", ".avif"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv", ".3gp"}
+ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 
 
 def get_db_connection():
@@ -36,7 +38,10 @@ def init_db():
         CREATE TABLE IF NOT EXISTS posts (
             post_id TEXT PRIMARY KEY,
             source_post_id TEXT,
+            button_message_id TEXT,
             post_text TEXT NOT NULL DEFAULT '',
+            message_text TEXT NOT NULL DEFAULT '',
+            attachments_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL DEFAULT ''
         )
         """
@@ -50,6 +55,8 @@ def init_db():
             username TEXT NOT NULL,
             comment TEXT NOT NULL DEFAULT '',
             image_path TEXT,
+            media_path TEXT,
+            media_type TEXT,
             parent_id INTEGER,
             edited_at TEXT,
             created_at TEXT NOT NULL
@@ -60,6 +67,10 @@ def init_db():
     comment_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(comments)").fetchall()}
     if "image_path" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN image_path TEXT")
+    if "media_path" not in comment_columns:
+        cursor.execute("ALTER TABLE comments ADD COLUMN media_path TEXT")
+    if "media_type" not in comment_columns:
+        cursor.execute("ALTER TABLE comments ADD COLUMN media_type TEXT")
     if "parent_id" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN parent_id INTEGER")
     if "edited_at" not in comment_columns:
@@ -68,8 +79,14 @@ def init_db():
     post_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(posts)").fetchall()}
     if "source_post_id" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN source_post_id TEXT")
+    if "button_message_id" not in post_columns:
+        cursor.execute("ALTER TABLE posts ADD COLUMN button_message_id TEXT")
     if "post_text" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN post_text TEXT NOT NULL DEFAULT ''")
+    if "message_text" not in post_columns:
+        cursor.execute("ALTER TABLE posts ADD COLUMN message_text TEXT NOT NULL DEFAULT ''")
+    if "attachments_json" not in post_columns:
+        cursor.execute("ALTER TABLE posts ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
     if "created_at" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
 
@@ -91,10 +108,10 @@ def normalize_comment(raw_comment: str | None) -> str:
     return (raw_comment or "").strip()[:1000]
 
 
-def build_file_url(image_path: str | None) -> str | None:
-    if not image_path:
+def build_file_url(file_path: str | None) -> str | None:
+    if not file_path:
         return None
-    return f"/uploads/{image_path}"
+    return f"/uploads/{file_path}"
 
 
 def allowed_file(filename: str) -> bool:
@@ -102,16 +119,23 @@ def allowed_file(filename: str) -> bool:
     return ext in ALLOWED_EXTENSIONS
 
 
-def save_uploaded_image(file_storage):
+def get_media_kind(filename: str) -> str:
+    _, ext = os.path.splitext(filename.lower())
+    if ext in VIDEO_EXTENSIONS:
+        return "video"
+    return "image"
+
+
+def save_uploaded_media(file_storage):
     if not file_storage or not file_storage.filename:
-        return None
+        return None, None
     filename = secure_filename(file_storage.filename)
     if not filename or not allowed_file(filename):
-        raise ValueError("Можно загружать только JPG, PNG, GIF или WEBP")
+        raise ValueError("Можно загружать изображения и видео: JPG, PNG, GIF, WEBP, BMP, SVG, HEIC, AVIF, MP4, MOV, WEBM, M4V, AVI, MKV, 3GP")
     _, ext = os.path.splitext(filename)
     stored_name = f"{uuid.uuid4().hex}{ext.lower()}"
     file_storage.save(os.path.join(UPLOAD_DIR, stored_name))
-    return stored_name
+    return stored_name, get_media_kind(filename)
 
 
 def parse_request_payload():
@@ -170,13 +194,16 @@ def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> d
             "comment": (parent["comment"] or "Фото")[:80],
         }
 
+    media_path = row["media_path"] if "media_path" in row.keys() else row["image_path"]
+    media_type = row["media_type"] if "media_type" in row.keys() and row["media_type"] else ("image" if media_path else None)
     return {
         "id": row["id"],
         "post_id": row["post_id"],
         "user_id": row["user_id"],
         "username": row["username"],
         "comment": row["comment"],
-        "image_url": build_file_url(row["image_path"]),
+        "image_url": build_file_url(media_path),
+        "media_type": media_type,
         "parent_id": row["parent_id"],
         "parent_preview": parent_preview,
         "edited_at": row["edited_at"],
@@ -187,7 +214,7 @@ def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> d
 def get_post_info(post_id: str) -> dict | None:
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT post_id, source_post_id, post_text, created_at FROM posts WHERE post_id = ?",
+        "SELECT post_id, source_post_id, button_message_id, post_text, message_text, attachments_json, created_at FROM posts WHERE post_id = ?",
         (post_id,),
     ).fetchone()
     conn.close()
@@ -196,14 +223,18 @@ def get_post_info(post_id: str) -> dict | None:
     return {
         "post_id": row["post_id"],
         "source_post_id": row["source_post_id"],
+        "button_message_id": row["button_message_id"],
         "post_text": row["post_text"],
+        "message_text": row["message_text"],
+        "attachments_json": row["attachments_json"],
         "created_at": row["created_at"],
     }
 
 
 def refresh_post_button(post_id: str):
     post = get_post_info(post_id)
-    if not post or not post.get("source_post_id"):
+    target_message_id = (post or {}).get("button_message_id") or (post or {}).get("source_post_id")
+    if not post or not target_message_id:
         return
 
     conn = get_db_connection()
@@ -212,28 +243,37 @@ def refresh_post_button(post_id: str):
     count = count_row["count"] if count_row else 0
     button_text = f"Комментарии ({count})" if count else "Открыть комментарии"
 
-    payload = {
-        "text": post.get("post_text", ""),
-        "notify": True,
-        "attachments": [
-            {
-                "type": "inline_keyboard",
-                "payload": {
-                    "buttons": [[
-                        {
-                            "type": "link",
-                            "text": button_text,
-                            "url": f"https://max.ru/{BOT_USERNAME}?startapp={post_id}",
-                        }
-                    ]]
-                }
+    try:
+        attachments = json.loads(post.get("attachments_json") or "[]")
+        if not isinstance(attachments, list):
+            attachments = []
+    except json.JSONDecodeError:
+        attachments = []
+
+    attachments.append(
+        {
+            "type": "inline_keyboard",
+            "payload": {
+                "buttons": [[
+                    {
+                        "type": "link",
+                        "text": button_text,
+                        "url": f"https://max.ru/{BOT_USERNAME}?startapp={post_id}",
+                    }
+                ]]
             }
-        ],
+        }
+    )
+
+    payload = {
+        "text": post.get("message_text", ""),
+        "notify": True,
+        "attachments": attachments,
     }
 
     try:
         req = Request(
-            url=f"https://botapi.max.ru/messages?access_token={BOT_TOKEN}&message_id={post['source_post_id']}",
+            url=f"https://botapi.max.ru/messages?access_token={BOT_TOKEN}&message_id={target_message_id}",
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="PUT",
@@ -434,11 +474,17 @@ HTML_TEMPLATE = """
             line-height: 1.45;
         }
 
-        .message-image {
+        .message-image,
+        .message-video {
             display: block;
             margin-top: 8px;
             max-width: min(100%, 320px);
             border-radius: 14px;
+        }
+
+        .message-video {
+            width: 100%;
+            background: #000;
         }
 
         .message-meta {
@@ -542,7 +588,8 @@ HTML_TEMPLATE = """
             display: block;
         }
 
-        .preview img {
+        .preview img,
+        .preview video {
             max-width: 160px;
             border-radius: 12px;
             display: block;
@@ -672,13 +719,14 @@ HTML_TEMPLATE = """
             <div class="reply-box" id="replyBox"></div>
             <textarea id="comment" maxlength="1000" placeholder="Написать комментарий..."></textarea>
             <div class="attachment-row">
-                <button class="attach-btn" id="attachBtn" type="button">Фото</button>
-                <input id="imageInput" type="file" accept="image/*" hidden>
+                <button class="attach-btn" id="attachBtn" type="button">Фото/видео</button>
+                <input id="imageInput" type="file" accept="image/*,video/*" hidden>
             </div>
             <div class="preview" id="imagePreview">
-                <img id="previewImage" alt="preview">
+                <img id="previewImage" alt="preview" hidden>
+                <video id="previewVideo" controls playsinline hidden></video>
                 <div class="preview-actions">
-                    <button class="attach-btn" id="removeImageBtn" type="button">Убрать фото</button>
+                    <button class="attach-btn" id="removeImageBtn" type="button">Убрать вложение</button>
                 </div>
             </div>
             <div class="composer-actions">
@@ -704,6 +752,7 @@ HTML_TEMPLATE = """
         const imageInput = document.getElementById("imageInput");
         const imagePreview = document.getElementById("imagePreview");
         const previewImage = document.getElementById("previewImage");
+        const previewVideo = document.getElementById("previewVideo");
         const removeImageBtn = document.getElementById("removeImageBtn");
         const postCard = document.getElementById("postCard");
         const postCardText = document.getElementById("postCardText");
@@ -812,11 +861,23 @@ HTML_TEMPLATE = """
             if (!file) {
                 imagePreview.classList.remove("show");
                 previewImage.removeAttribute("src");
+                previewImage.hidden = true;
+                previewVideo.removeAttribute("src");
+                previewVideo.hidden = true;
+                previewVideo.load();
                 return;
             }
             const reader = new FileReader();
             reader.onload = () => {
-                previewImage.src = reader.result;
+                const isVideo = (file.type || "").startsWith("video/");
+                previewImage.hidden = isVideo;
+                previewVideo.hidden = !isVideo;
+                if (isVideo) {
+                    previewVideo.src = reader.result;
+                    previewVideo.load();
+                } else {
+                    previewImage.src = reader.result;
+                }
                 imagePreview.classList.add("show");
             };
             reader.readAsDataURL(file);
@@ -831,6 +892,10 @@ HTML_TEMPLATE = """
             imageInput.value = "";
             imagePreview.classList.remove("show");
             previewImage.removeAttribute("src");
+            previewImage.hidden = true;
+            previewVideo.removeAttribute("src");
+            previewVideo.hidden = true;
+            previewVideo.load();
             submitBtn.textContent = "Отправить";
             replyBox.classList.remove("show");
             replyBox.textContent = "";
@@ -840,7 +905,11 @@ HTML_TEMPLATE = """
         function renderCommentNode(comment, replyMap) {
             const mine = currentUser && comment.user_id === currentUser.user_id;
             const initial = escapeHtml((comment.username || "?").charAt(0).toUpperCase());
-            const imageHtml = comment.image_url ? `<img class="message-image" src="${comment.image_url}" alt="comment image">` : "";
+            const mediaHtml = comment.image_url
+                ? (comment.media_type === "video"
+                    ? `<video class="message-video" src="${comment.image_url}" controls playsinline preload="metadata"></video>`
+                    : `<img class="message-image" src="${comment.image_url}" alt="comment media">`)
+                : "";
             const editedHtml = comment.edited_at ? '<span>изменено</span>' : "";
             const parentPreview = comment.parent_preview ? `<div class="reply-pill" onclick="jumpToComment(${comment.parent_id})">Ответ для ${escapeHtml(comment.parent_preview.username)}: ${escapeHtml(comment.parent_preview.comment)}</div>` : "";
             const replies = (replyMap[comment.id] || []).map((child) => `<div class="message-thread reply">${renderCommentNode(child, replyMap)}</div>`).join("");
@@ -852,7 +921,7 @@ HTML_TEMPLATE = """
                             <div class="message-name">${escapeHtml(comment.username)}</div>
                             ${parentPreview}
                             <div class="message-text">${escapeHtml(comment.comment)}</div>
-                            ${imageHtml}
+                            ${mediaHtml}
                             <div class="message-meta">
                                 ${editedHtml}
                                 <span>${formatDate(comment.edited_at || comment.created_at)}</span>
@@ -922,7 +991,7 @@ HTML_TEMPLATE = """
                 return;
             }
             if (!comment && !selectedImage && !editingCommentId) {
-                showStatus("Введите комментарий или выберите фото", "error");
+                showStatus("Введите комментарий или выберите фото/видео", "error");
                 return;
             }
 
@@ -1145,20 +1214,28 @@ def register_post():
     payload = request.get_json(silent=True) or {}
     post_id = normalize_post_id(payload.get("post_id"))
     source_post_id = str(payload.get("source_post_id") or "").strip()[:256]
+    button_message_id = str(payload.get("button_message_id") or "").strip()[:256]
     post_text = (payload.get("post_text") or "").strip()[:4000]
-    if not post_id or not post_text:
+    message_text = (payload.get("message_text") or "").strip()[:4000]
+    attachments_json = payload.get("attachments") or []
+    if not isinstance(attachments_json, list):
+        attachments_json = []
+    if not post_id:
         return jsonify({"error": "Не переданы данные поста"}), 400
 
     conn = get_db_connection()
     conn.execute(
         """
-        INSERT INTO posts (post_id, source_post_id, post_text, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO posts (post_id, source_post_id, button_message_id, post_text, message_text, attachments_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(post_id) DO UPDATE SET
             source_post_id = excluded.source_post_id,
-            post_text = excluded.post_text
+            button_message_id = excluded.button_message_id,
+            post_text = excluded.post_text,
+            message_text = excluded.message_text,
+            attachments_json = excluded.attachments_json
         """,
-        (post_id, source_post_id, post_text, datetime.now(timezone.utc).isoformat()),
+        (post_id, source_post_id, button_message_id, post_text, message_text, json.dumps(attachments_json, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     conn.close()
@@ -1174,7 +1251,7 @@ def get_comments_by_post(post_id):
     conn = get_db_connection()
     rows = conn.execute(
         """
-        SELECT id, post_id, user_id, username, comment, image_path, parent_id, edited_at, created_at
+        SELECT id, post_id, user_id, username, comment, image_path, media_path, media_type, parent_id, edited_at, created_at
         FROM comments
         WHERE post_id = ?
         ORDER BY created_at DESC
@@ -1212,10 +1289,10 @@ def add_comment():
     if not verified_user:
         return jsonify({"error": "Не удалось подтвердить пользователя MAX"}), 400
     try:
-        image_path = save_uploaded_image(files.get("image")) if files else None
+        media_path, media_type = save_uploaded_media(files.get("image")) if files else (None, None)
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
-    if not comment and not image_path:
+    if not comment and not media_path:
         return jsonify({"error": "Комментарий пустой"}), 400
 
     normalized_parent_id = int(parent_id) if str(parent_id or "").isdigit() else None
@@ -1224,10 +1301,10 @@ def add_comment():
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO comments (post_id, user_id, username, comment, image_path, parent_id, edited_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO comments (post_id, user_id, username, comment, image_path, media_path, media_type, parent_id, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (post_id, verified_user["user_id"], verified_user["username"], comment, image_path, normalized_parent_id, None, created_at),
+        (post_id, verified_user["user_id"], verified_user["username"], comment, media_path, media_path, media_type, normalized_parent_id, None, created_at),
     )
     conn.commit()
     comment_id = cursor.lastrowid
@@ -1247,13 +1324,13 @@ def edit_comment(comment_id):
 
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT id, image_path FROM comments WHERE id = ? AND user_id = ?",
+        "SELECT id, COALESCE(media_path, image_path) AS media_path FROM comments WHERE id = ? AND user_id = ?",
         (comment_id, verified_user["user_id"]),
     ).fetchone()
     if not row:
         conn.close()
         return jsonify({"error": "Комментарий не найден или нет прав"}), 404
-    if not comment and not row["image_path"]:
+    if not comment and not row["media_path"]:
         conn.close()
         return jsonify({"error": "Комментарий пустой"}), 400
 
@@ -1273,7 +1350,7 @@ def delete_comment(comment_id):
         return jsonify({"error": "Не передан user_id"}), 400
 
     conn = get_db_connection()
-    row = conn.execute("SELECT post_id, image_path FROM comments WHERE id = ? AND user_id = ?", (comment_id, user_id)).fetchone()
+    row = conn.execute("SELECT post_id, COALESCE(media_path, image_path) AS media_path FROM comments WHERE id = ? AND user_id = ?", (comment_id, user_id)).fetchone()
     if not row:
         conn.close()
         return jsonify({"error": "Комментарий не найден или нет прав"}), 404
@@ -1282,8 +1359,8 @@ def delete_comment(comment_id):
     conn.commit()
     conn.close()
 
-    if row["image_path"]:
-        file_path = os.path.join(UPLOAD_DIR, row["image_path"])
+    if row["media_path"]:
+        file_path = os.path.join(UPLOAD_DIR, row["media_path"])
         if os.path.exists(file_path):
             os.remove(file_path)
     refresh_post_button(row["post_id"])
