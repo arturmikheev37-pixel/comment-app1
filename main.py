@@ -676,7 +676,7 @@ HTML_TEMPLATE = """
         .message-video {
             display: block;
             margin-top: 8px;
-            max-width: min(100%, 320px);
+            max-width: min(100%, 240px);
             border-radius: 14px;
         }
 
@@ -685,7 +685,7 @@ HTML_TEMPLATE = """
         }
 
         .message-video {
-            width: 100%;
+            width: min(100%, 260px);
             background: #000;
         }
 
@@ -1136,18 +1136,39 @@ HTML_TEMPLATE = """
             mediaViewer.setAttribute("aria-hidden", "true");
             mediaViewerImage.removeAttribute("src");
             mediaViewerImage.hidden = true;
+            mediaViewerImage.style.display = "none";
             mediaViewerVideo.pause();
             mediaViewerVideo.removeAttribute("src");
             mediaViewerVideo.hidden = true;
+            mediaViewerVideo.style.display = "none";
             mediaViewerVideo.load();
             document.body.style.overflow = "";
         }
 
+        function normalizeMediaType(mediaType, url) {
+            const type = String(mediaType || "").toLowerCase();
+            if (type === "image" || type === "video") {
+                return type;
+            }
+            const safeUrl = String(url || "").toLowerCase();
+            if (safeUrl.match(/\\.(mp4|mov|webm|m4v)(\\?|$)/)) {
+                return "video";
+            }
+            return "image";
+        }
+
         function openMediaViewer(url, mediaType) {
             if (!url) return;
-            const isVideo = mediaType === "video";
+            const normalizedType = normalizeMediaType(mediaType, url);
+            const isVideo = normalizedType === "video";
+            mediaViewerImage.removeAttribute("src");
+            mediaViewerVideo.pause();
+            mediaViewerVideo.removeAttribute("src");
+            mediaViewerVideo.load();
             mediaViewerImage.hidden = isVideo;
+            mediaViewerImage.style.display = isVideo ? "none" : "block";
             mediaViewerVideo.hidden = !isVideo;
+            mediaViewerVideo.style.display = isVideo ? "block" : "none";
             if (isVideo) {
                 mediaViewerVideo.src = url;
                 mediaViewerVideo.load();
@@ -1273,8 +1294,9 @@ HTML_TEMPLATE = """
             const mine = currentUser && comment.user_id === currentUser.user_id;
             const initial = escapeHtml((comment.username || "?").charAt(0).toUpperCase());
             const mediaUrl = comment.image_url ? encodeURI(comment.image_url) : "";
+            const normalizedMediaType = normalizeMediaType(comment.media_type, mediaUrl);
             const mediaHtml = comment.image_url
-                ? (comment.media_type === "video"
+                ? (normalizedMediaType === "video"
                     ? `<video class="message-video" src="${mediaUrl}" controls playsinline preload="metadata"></video><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'video'); return false;">Открыть видео</a>`
                     : `<img class="message-image" src="${mediaUrl}" alt="comment media" loading="lazy" onclick="openMediaViewer('${mediaUrl}', 'image')"><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'image'); return false;">Открыть фото</a>`)
                 : "";
