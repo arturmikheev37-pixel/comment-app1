@@ -464,19 +464,12 @@ HTML_TEMPLATE = """
             margin-top: 8px;
         }
 
-        .reaction-btn {
-            border: none;
+        .reaction-chip {
             background: rgba(255, 255, 255, 0.06);
             color: #d7e9ff;
             border-radius: 999px;
             padding: 4px 8px;
             font-size: 12px;
-            cursor: pointer;
-        }
-
-        .reaction-btn.active {
-            background: rgba(46, 166, 255, 0.22);
-            color: #ffffff;
         }
 
         .empty {
@@ -496,25 +489,25 @@ HTML_TEMPLATE = """
             bottom: 0;
             transform: translateX(-50%);
             width: min(760px, 100%);
-            padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+            padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
             background: linear-gradient(to top, rgba(14, 22, 33, 0.98), rgba(14, 22, 33, 0.74));
         }
 
         .composer-card {
             background: rgba(23, 33, 43, 0.96);
             border: 1px solid var(--tg-panel-border);
-            border-radius: 24px;
-            padding: 10px;
+            border-radius: 20px;
+            padding: 8px;
             box-shadow: 0 12px 34px rgba(0, 0, 0, 0.28);
         }
 
         .identity {
             width: 100%;
             background: #223140;
-            border-radius: 16px;
-            padding: 10px 12px;
-            margin-bottom: 8px;
-            font-size: 14px;
+            border-radius: 14px;
+            padding: 8px 10px;
+            margin-bottom: 6px;
+            font-size: 12px;
         }
 
         .reply-box {
@@ -602,17 +595,18 @@ HTML_TEMPLATE = """
 
         textarea {
             width: 100%;
-            min-height: 62px;
-            max-height: 180px;
+            min-height: 44px;
+            max-height: 120px;
             resize: vertical;
             background: #223140;
             border: 1px solid transparent;
             color: white;
-            border-radius: 18px;
-            padding: 12px 14px;
+            border-radius: 16px;
+            padding: 10px 12px;
             outline: none;
             font: inherit;
-            line-height: 1.4;
+            font-size: 14px;
+            line-height: 1.35;
         }
 
         textarea:focus {
@@ -620,7 +614,7 @@ HTML_TEMPLATE = """
         }
 
         .composer-actions {
-            margin-top: 8px;
+            margin-top: 6px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -647,9 +641,41 @@ HTML_TEMPLATE = """
             color: white;
             font: inherit;
             font-weight: 700;
-            border-radius: 18px;
-            padding: 10px 16px;
+            border-radius: 16px;
+            padding: 8px 14px;
             cursor: pointer;
+        }
+
+        .action-menu {
+            position: fixed;
+            z-index: 31;
+            display: none;
+            min-width: 160px;
+            padding: 6px;
+            border-radius: 16px;
+            background: rgba(23, 33, 43, 0.99);
+            border: 1px solid var(--tg-panel-border);
+            box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
+        }
+
+        .action-menu.show {
+            display: block;
+        }
+
+        .action-menu button {
+            width: 100%;
+            text-align: left;
+            border: none;
+            background: transparent;
+            color: #ffffff;
+            font: inherit;
+            padding: 10px 12px;
+            border-radius: 12px;
+            cursor: pointer;
+        }
+
+        .action-menu button:hover {
+            background: rgba(255, 255, 255, 0.08);
         }
 
         .send-btn:disabled {
@@ -720,6 +746,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
     <div class="reaction-menu" id="reactionMenu"></div>
+    <div class="action-menu" id="actionMenu"></div>
 
     <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
@@ -739,6 +766,7 @@ HTML_TEMPLATE = """
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
         const reactionMenu = document.getElementById("reactionMenu");
+        const actionMenu = document.getElementById("actionMenu");
 
         let initData = "";
         let postId = "";
@@ -750,6 +778,7 @@ HTML_TEMPLATE = """
         let postInfo = null;
         const reactionOptions = ["👍", "❤️", "🔥", "😂"];
         let reactionMenuCommentId = null;
+        let actionMenuCommentId = null;
         let longPressTimer = null;
 
         function resolveWebAppObject() {
@@ -858,11 +887,8 @@ HTML_TEMPLATE = """
 
         function renderReactionButtons(comment) {
             const reactions = comment.reactions || {};
-            const myReactions = comment.my_reactions || [];
-            return reactionOptions.map((emoji) => {
-                const count = reactions[emoji] || 0;
-                const active = myReactions.includes(emoji) ? "active" : "";
-                return `<button class="reaction-btn ${active}" type="button" onclick="toggleReaction(${comment.id}, ${JSON.stringify(emoji)})">${emoji} ${count || ""}</button>`;
+            return Object.entries(reactions).map(([emoji, count]) => {
+                return `<span class="reaction-chip">${emoji} ${count}</span>`;
             }).join("");
         }
 
@@ -884,9 +910,6 @@ HTML_TEMPLATE = """
                             ${imageHtml}
                             <div class="reactions">${renderReactionButtons(comment)}</div>
                             <div class="message-meta">
-                                <span class="message-action" onclick="startReply(${comment.id})">Ответить</span>
-                                ${mine ? `<span class="message-action" onclick="startEdit(${comment.id})">Ред.</span>` : ""}
-                                ${mine ? `<span class="message-delete" onclick="deleteComment(${comment.id})">Удалить</span>` : ""}
                                 ${editedHtml}
                                 <span>${formatDate(comment.edited_at || comment.created_at)}</span>
                             </div>
@@ -1071,19 +1094,46 @@ HTML_TEMPLATE = """
             reactionMenuCommentId = null;
         }
 
+        function openActionMenu(commentId, targetElement) {
+            const comment = latestComments.find((item) => item.id === commentId);
+            if (!comment) return;
+            actionMenuCommentId = commentId;
+            const isMine = currentUser && comment.user_id === currentUser.user_id;
+            actionMenu.innerHTML = `
+                <button type="button" onclick="menuReply()">Ответить</button>
+                ${isMine ? '<button type="button" onclick="menuEdit()">Редактировать</button>' : ''}
+                ${isMine ? '<button type="button" onclick="menuDelete()">Удалить</button>' : ''}
+            `;
+            const rect = targetElement.getBoundingClientRect();
+            actionMenu.style.left = Math.max(8, rect.left) + "px";
+            actionMenu.style.top = Math.min(window.innerHeight - 180, rect.bottom + 8) + "px";
+            actionMenu.classList.add("show");
+        }
+
+        function closeActionMenu() {
+            actionMenu.classList.remove("show");
+            actionMenuCommentId = null;
+        }
+
         function bindLongPressHandlers() {
             document.querySelectorAll(".bubble[data-comment-id]").forEach((bubble) => {
                 const commentId = Number(bubble.dataset.commentId);
                 const start = (event) => {
-                    if (event.target.closest(".reaction-btn, .message-action, .message-delete")) return;
+                    if (event.target.closest(".message-action, .message-delete")) return;
                     clearTimeout(longPressTimer);
                     longPressTimer = setTimeout(() => openReactionMenu(commentId, bubble), 450);
+                };
+                const clickOpen = (event) => {
+                    if (event.target.closest(".message-action, .message-delete")) return;
+                    closeReactionMenu();
+                    openActionMenu(commentId, bubble);
                 };
                 const cancel = () => {
                     clearTimeout(longPressTimer);
                 };
                 bubble.onmousedown = start;
                 bubble.ontouchstart = start;
+                bubble.onclick = clickOpen;
                 bubble.onmouseup = cancel;
                 bubble.onmouseleave = cancel;
                 bubble.ontouchend = cancel;
@@ -1095,6 +1145,27 @@ HTML_TEMPLATE = """
             if (!reactionMenuCommentId) return;
             closeReactionMenu();
             await toggleReaction(reactionMenuCommentId, reaction);
+        }
+
+        function menuReply() {
+            if (!actionMenuCommentId) return;
+            const id = actionMenuCommentId;
+            closeActionMenu();
+            startReply(id);
+        }
+
+        function menuEdit() {
+            if (!actionMenuCommentId) return;
+            const id = actionMenuCommentId;
+            closeActionMenu();
+            startEdit(id);
+        }
+
+        async function menuDelete() {
+            if (!actionMenuCommentId) return;
+            const id = actionMenuCommentId;
+            closeActionMenu();
+            await deleteComment(id);
         }
 
         async function boot() {
@@ -1135,6 +1206,9 @@ HTML_TEMPLATE = """
                 if (!reactionMenu.contains(event.target)) {
                     closeReactionMenu();
                 }
+                if (!actionMenu.contains(event.target)) {
+                    closeActionMenu();
+                }
             });
 
             await loadComments();
@@ -1146,6 +1220,9 @@ HTML_TEMPLATE = """
         window.startReply = startReply;
         window.toggleReaction = toggleReaction;
         window.pickReaction = pickReaction;
+        window.menuReply = menuReply;
+        window.menuEdit = menuEdit;
+        window.menuDelete = menuDelete;
         boot();
     </script>
 </body>
