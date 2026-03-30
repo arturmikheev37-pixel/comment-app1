@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
-import hashlib
 import hmac
+import hashlib
 import json
 import os
 import sqlite3
@@ -31,12 +31,22 @@ def init_db():
     cursor = conn.cursor()
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS posts (
+            post_id TEXT PRIMARY KEY,
+            source_post_id TEXT,
+            post_text TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS comments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             post_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             username TEXT NOT NULL,
-            comment TEXT NOT NULL,
+            comment TEXT NOT NULL DEFAULT '',
             image_path TEXT,
             parent_id INTEGER,
             edited_at TEXT,
@@ -44,36 +54,13 @@ def init_db():
         )
         """
     )
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS posts (
-            post_id TEXT PRIMARY KEY,
-            source_post_id TEXT,
-            post_text TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS comment_reactions (
-            comment_id INTEGER NOT NULL,
-            user_id TEXT NOT NULL,
-            reaction TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (comment_id, user_id, reaction)
-        )
-        """
-    )
 
-    columns = {row["name"] for row in cursor.execute("PRAGMA table_info(comments)").fetchall()}
-    if "post_id" not in columns:
-        cursor.execute("ALTER TABLE comments ADD COLUMN post_id TEXT")
-    if "image_path" not in columns:
+    comment_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(comments)").fetchall()}
+    if "image_path" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN image_path TEXT")
-    if "parent_id" not in columns:
+    if "parent_id" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN parent_id INTEGER")
-    if "edited_at" not in columns:
+    if "edited_at" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN edited_at TEXT")
 
     post_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(posts)").fetchall()}
@@ -84,13 +71,6 @@ def init_db():
     if "created_at" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
 
-    cursor.execute(
-        """
-        UPDATE comments
-        SET post_id = CAST(id AS TEXT)
-        WHERE post_id IS NULL OR TRIM(post_id) = '' OR post_id = 'global'
-        """
-    )
     cursor.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_comments_post_created
@@ -113,62 +93,6 @@ def build_file_url(image_path: str | None) -> str | None:
     if not image_path:
         return None
     return f"/uploads/{image_path}"
-
-
-def serialize_comment(row: sqlite3.Row) -> dict:
-    return {
-        "id": row["id"],
-        "post_id": row["post_id"],
-        "user_id": row["user_id"],
-        "username": row["username"],
-        "comment": row["comment"],
-        "image_url": build_file_url(row["image_path"]),
-        "parent_id": row["parent_id"],
-        "edited_at": row["edited_at"],
-        "created_at": row["created_at"],
-    }
-
-
-def serialize_post(row: sqlite3.Row | None) -> dict | None:
-    if not row:
-        return None
-    return {
-        "post_id": row["post_id"],
-        "source_post_id": row["source_post_id"],
-        "post_text": row["post_text"],
-        "created_at": row["created_at"],
-    }
-
-
-def get_post_info(post_id: str) -> dict | None:
-    conn = get_db_connection()
-    row = conn.execute(
-        "SELECT post_id, source_post_id, post_text, created_at FROM posts WHERE post_id = ?",
-        (post_id,),
-    ).fetchone()
-    conn.close()
-    return serialize_post(row)
-
-
-def get_reactions_map(post_id: str) -> dict[int, dict]:
-    conn = get_db_connection()
-    rows = conn.execute(
-        """
-        SELECT r.comment_id, r.reaction, r.user_id
-        FROM comment_reactions r
-        JOIN comments c ON c.id = r.comment_id
-        WHERE c.post_id = ?
-        """,
-        (post_id,),
-    ).fetchall()
-    conn.close()
-
-    result: dict[int, dict] = {}
-    for row in rows:
-        comment_bucket = result.setdefault(row["comment_id"], {"counts": {}, "users": {}})
-        comment_bucket["counts"][row["reaction"]] = comment_bucket["counts"].get(row["reaction"], 0) + 1
-        comment_bucket["users"].setdefault(row["reaction"], []).append(row["user_id"])
-    return result
 
 
 def allowed_file(filename: str) -> bool:
@@ -205,8 +129,8 @@ def parse_max_user(raw_user: str | dict | None) -> dict | None:
         except json.JSONDecodeError:
             return None
 
-    first_name = (user.get("first_name") or "").strip()
-    last_name = (user.get("last_name") or "").strip()
+    first_name = (user.get("first_name") or user.get("firstName") or "").strip()
+    last_name = (user.get("last_name") or user.get("lastName") or "").strip()
     username = " ".join(part for part in [first_name, last_name] if part).strip()
     if not username:
         username = (user.get("username") or "Пользователь MAX").strip()
@@ -214,11 +138,7 @@ def parse_max_user(raw_user: str | dict | None) -> dict | None:
     user_id = str(user.get("user_id") or user.get("id") or "").strip()
     if not user_id:
         return None
-
-    return {
-        "user_id": user_id[:128],
-        "username": username[:50] or "Пользователь MAX",
-    }
+    return {"user_id": user_id[:128], "username": username[:50] or "Пользователь MAX"}
 
 
 def validate_max_init_data(init_data: str) -> dict | None:
@@ -234,11 +154,49 @@ def validate_max_init_data(init_data: str) -> dict | None:
     data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(values.items()))
     secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
     calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
-
     if not hmac.compare_digest(calculated_hash, received_hash):
         return None
-
     return parse_max_user(values.get("user"))
+
+
+def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> dict:
+    parent_preview = None
+    if comment_lookup and row["parent_id"] and row["parent_id"] in comment_lookup:
+        parent = comment_lookup[row["parent_id"]]
+        parent_preview = {
+            "username": parent["username"],
+            "comment": (parent["comment"] or "Фото")[:80],
+        }
+
+    return {
+        "id": row["id"],
+        "post_id": row["post_id"],
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "comment": row["comment"],
+        "image_url": build_file_url(row["image_path"]),
+        "parent_id": row["parent_id"],
+        "parent_preview": parent_preview,
+        "edited_at": row["edited_at"],
+        "created_at": row["created_at"],
+    }
+
+
+def get_post_info(post_id: str) -> dict | None:
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT post_id, source_post_id, post_text, created_at FROM posts WHERE post_id = ?",
+        (post_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "post_id": row["post_id"],
+        "source_post_id": row["source_post_id"],
+        "post_text": row["post_text"],
+        "created_at": row["created_at"],
+    }
 
 
 HTML_TEMPLATE = """
@@ -246,7 +204,7 @@ HTML_TEMPLATE = """
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Комментарии</title>
     <style>
         :root {
@@ -271,6 +229,7 @@ HTML_TEMPLATE = """
             background: var(--tg-bg);
             color: var(--tg-text);
             font-family: "Segoe UI", Tahoma, sans-serif;
+            overflow-x: hidden;
         }
 
         body {
@@ -302,29 +261,10 @@ HTML_TEMPLATE = """
         .title {
             display: flex;
             align-items: center;
-            justify-content: space-between;
             gap: 10px;
+            justify-content: center;
             font-size: 17px;
             font-weight: 700;
-        }
-
-        .title-left {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .title-user {
-            max-width: 48%;
-            padding: 6px 10px;
-            border-radius: 999px;
-            background: rgba(255, 255, 255, 0.06);
-            color: #d7e9ff;
-            font-size: 12px;
-            font-weight: 600;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
         }
 
         .title-dot {
@@ -333,14 +273,6 @@ HTML_TEMPLATE = """
             border-radius: 50%;
             background: #52d273;
             box-shadow: 0 0 10px rgba(82, 210, 115, 0.6);
-        }
-
-        .subtitle {
-            margin-top: 4px;
-            color: var(--tg-muted);
-            font-size: 12px;
-            word-break: break-all;
-            display: none;
         }
 
         .post-card {
@@ -374,16 +306,10 @@ HTML_TEMPLATE = """
 
         .feed {
             flex: 1;
-            padding: 4px 12px 110px;
+            padding: 4px 12px 96px;
             display: flex;
             flex-direction: column;
             gap: 10px;
-        }
-
-        .message-row {
-            display: flex;
-            gap: 8px;
-            align-items: flex-end;
         }
 
         .message-thread {
@@ -393,7 +319,13 @@ HTML_TEMPLATE = """
         }
 
         .message-thread.reply {
-            margin-left: 44px;
+            margin-left: 40px;
+        }
+
+        .message-row {
+            display: flex;
+            gap: 8px;
+            align-items: flex-end;
         }
 
         .message-row.mine {
@@ -434,6 +366,16 @@ HTML_TEMPLATE = """
             margin-bottom: 4px;
         }
 
+        .reply-pill {
+            margin-bottom: 6px;
+            padding: 6px 8px;
+            border-left: 2px solid #59aef9;
+            background: rgba(255, 255, 255, 0.04);
+            border-radius: 10px;
+            font-size: 12px;
+            color: #c9def2;
+        }
+
         .message-text {
             white-space: pre-wrap;
             word-break: break-word;
@@ -458,41 +400,6 @@ HTML_TEMPLATE = """
             font-size: 11px;
         }
 
-        .message-delete {
-            cursor: pointer;
-            color: #ffd5d5;
-        }
-
-        .message-action {
-            cursor: pointer;
-            color: #d7e9ff;
-        }
-
-        .reply-pill {
-            margin-bottom: 6px;
-            padding: 6px 8px;
-            border-left: 2px solid #59aef9;
-            background: rgba(255, 255, 255, 0.04);
-            border-radius: 10px;
-            font-size: 12px;
-            color: #c9def2;
-        }
-
-        .reactions {
-            display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
-            margin-top: 8px;
-        }
-
-        .reaction-chip {
-            background: rgba(255, 255, 255, 0.06);
-            color: #d7e9ff;
-            border-radius: 999px;
-            padding: 4px 8px;
-            font-size: 12px;
-        }
-
         .empty {
             align-self: center;
             margin-top: 28px;
@@ -502,6 +409,7 @@ HTML_TEMPLATE = """
             padding: 18px 20px;
             border-radius: 18px;
             border: 1px solid rgba(255, 255, 255, 0.06);
+            max-width: calc(100vw - 32px);
         }
 
         .composer {
@@ -522,20 +430,10 @@ HTML_TEMPLATE = """
             box-shadow: 0 12px 34px rgba(0, 0, 0, 0.28);
         }
 
-        .identity {
-            width: 100%;
-            background: #223140;
-            border-radius: 14px;
-            padding: 8px 10px;
-            margin-bottom: 6px;
-            font-size: 12px;
-            display: none;
-        }
-
         .reply-box {
             display: none;
-            margin-bottom: 8px;
-            padding: 10px 12px;
+            margin-bottom: 6px;
+            padding: 8px 10px;
             border-radius: 14px;
             background: #223140;
             font-size: 12px;
@@ -546,44 +444,32 @@ HTML_TEMPLATE = """
             display: block;
         }
 
-        .reaction-menu {
-            position: fixed;
-            z-index: 30;
-            display: none;
-            gap: 8px;
-            flex-wrap: wrap;
-            padding: 8px;
-            border-radius: 18px;
-            background: rgba(23, 33, 43, 0.98);
-            border: 1px solid var(--tg-panel-border);
-            box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
-            max-width: min(92vw, 320px);
-        }
-
-        .reaction-menu.show {
-            display: flex;
-        }
-
-        .reaction-menu button {
-            border: none;
-            background: transparent;
+        textarea {
+            width: 100%;
+            min-height: 44px;
+            max-height: 120px;
+            resize: vertical;
+            background: #223140;
+            border: 1px solid transparent;
             color: white;
-            font-size: 22px;
-            cursor: pointer;
-            padding: 4px 6px;
-            border-radius: 12px;
+            border-radius: 16px;
+            padding: 10px 12px;
+            outline: none;
+            font: inherit;
+            font-size: 14px;
+            line-height: 1.35;
         }
 
-        .reaction-menu button:hover {
-            background: rgba(255, 255, 255, 0.08);
+        textarea:focus {
+            border-color: rgba(46, 166, 255, 0.7);
         }
 
         .attachment-row {
-            margin-top: 8px;
+            margin-top: 6px;
             display: flex;
             align-items: center;
-            gap: 8px;
             justify-content: space-between;
+            gap: 8px;
         }
 
         .attach-btn {
@@ -615,26 +501,6 @@ HTML_TEMPLATE = """
             margin-top: 6px;
             display: flex;
             gap: 8px;
-        }
-
-        textarea {
-            width: 100%;
-            min-height: 44px;
-            max-height: 120px;
-            resize: vertical;
-            background: #223140;
-            border: 1px solid transparent;
-            color: white;
-            border-radius: 16px;
-            padding: 10px 12px;
-            outline: none;
-            font: inherit;
-            font-size: 14px;
-            line-height: 1.35;
-        }
-
-        textarea:focus {
-            border-color: rgba(46, 166, 255, 0.7);
         }
 
         .composer-actions {
@@ -670,11 +536,16 @@ HTML_TEMPLATE = """
             cursor: pointer;
         }
 
-        .action-menu {
+        .send-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .context-menu {
             position: fixed;
             z-index: 31;
             display: none;
-            min-width: 160px;
+            min-width: 170px;
             max-width: min(92vw, 240px);
             padding: 6px;
             border-radius: 16px;
@@ -683,11 +554,11 @@ HTML_TEMPLATE = """
             box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
         }
 
-        .action-menu.show {
+        .context-menu.show {
             display: block;
         }
 
-        .action-menu button {
+        .context-menu button {
             width: 100%;
             text-align: left;
             border: none;
@@ -699,13 +570,8 @@ HTML_TEMPLATE = """
             cursor: pointer;
         }
 
-        .action-menu button:hover {
+        .context-menu button:hover {
             background: rgba(255, 255, 255, 0.08);
-        }
-
-        .send-btn:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
         }
 
         @media (max-width: 640px) {
@@ -715,25 +581,16 @@ HTML_TEMPLATE = """
             }
 
             .bubble {
-                max-width: calc(100% - 44px);
-            }
-
-            .composer-actions {
-                align-items: flex-start;
-                flex-direction: column;
+                max-width: calc(100vw - 76px);
             }
 
             .send-btn {
                 width: 100%;
             }
 
-            .title {
+            .composer-actions {
                 align-items: flex-start;
                 flex-direction: column;
-            }
-
-            .title-user {
-                max-width: 100%;
             }
         }
     </style>
@@ -745,19 +602,16 @@ HTML_TEMPLATE = """
                 <span class="title-dot"></span>
                 <span>Комментарии</span>
             </div>
-            <div class="subtitle" id="postLabel">Загрузка контекста поста...</div>
         </header>
         <section class="post-card" id="postCard" hidden>
             <div class="post-card-label">Пост</div>
             <div class="post-card-text" id="postCardText"></div>
         </section>
-
         <main class="feed" id="commentsList"></main>
     </div>
 
     <div class="composer">
         <div class="composer-card">
-            <div class="identity" id="identity">Автор: определяем профиль MAX...</div>
             <div class="reply-box" id="replyBox"></div>
             <textarea id="comment" maxlength="1000" placeholder="Написать комментарий..."></textarea>
             <div class="attachment-row">
@@ -772,21 +626,19 @@ HTML_TEMPLATE = """
             </div>
             <div class="composer-actions">
                 <div>
-                    <div class="hint"><span id="charCount">0</span>/1000 • можно текст, эмодзи и фото</div>
+                    <div class="hint"><span id="charCount">0</span>/1000</div>
                     <div class="status" id="status"></div>
                 </div>
                 <button id="submitBtn" class="send-btn" type="button">Отправить</button>
             </div>
         </div>
     </div>
-    <div class="reaction-menu" id="reactionMenu"></div>
-    <div class="action-menu" id="actionMenu"></div>
+
+    <div class="context-menu" id="contextMenu"></div>
 
     <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
         const commentsList = document.getElementById("commentsList");
-        const postLabel = document.getElementById("postLabel");
-        const identity = document.getElementById("identity");
         const commentInput = document.getElementById("comment");
         const charCount = document.getElementById("charCount");
         const status = document.getElementById("status");
@@ -799,20 +651,16 @@ HTML_TEMPLATE = """
         const postCard = document.getElementById("postCard");
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
-        const reactionMenu = document.getElementById("reactionMenu");
-        const actionMenu = document.getElementById("actionMenu");
+        const contextMenu = document.getElementById("contextMenu");
 
         let initData = "";
         let postId = "";
         let currentUser = null;
         let selectedImage = null;
         let editingCommentId = null;
-        let latestComments = [];
         let replyToCommentId = null;
-        let postInfo = null;
-        const reactionOptions = ["👍", "❤️", "🔥", "😂"];
-        let reactionMenuCommentId = null;
-        let actionMenuCommentId = null;
+        let latestComments = [];
+        let menuCommentId = null;
         let longPressTimer = null;
 
         function resolveWebAppObject() {
@@ -856,13 +704,11 @@ HTML_TEMPLATE = """
             if (!appInstance) return null;
             const rawUser = (appInstance.initDataUnsafe && appInstance.initDataUnsafe.user) || appInstance.user || null;
             if (!rawUser) return null;
-
             const firstName = (rawUser.first_name || rawUser.firstName || "").trim();
             const lastName = (rawUser.last_name || rawUser.lastName || "").trim();
             const username = [firstName, lastName].filter(Boolean).join(" ").trim() || rawUser.username || "Пользователь MAX";
             const userId = String(rawUser.user_id || rawUser.id || "").trim();
             if (!userId) return null;
-
             return { user_id: userId, username: username };
         }
 
@@ -919,13 +765,6 @@ HTML_TEMPLATE = """
             replyBox.textContent = "";
         }
 
-        function renderReactionButtons(comment) {
-            const reactions = comment.reactions || {};
-            return Object.entries(reactions).map(([emoji, count]) => {
-                return `<span class="reaction-chip">${emoji} ${count}</span>`;
-            }).join("");
-        }
-
         function renderCommentNode(comment, replyMap) {
             const mine = currentUser && comment.user_id === currentUser.user_id;
             const initial = escapeHtml((comment.username || "?").charAt(0).toUpperCase());
@@ -942,7 +781,6 @@ HTML_TEMPLATE = """
                             ${parentPreview}
                             <div class="message-text">${escapeHtml(comment.comment)}</div>
                             ${imageHtml}
-                            <div class="reactions">${renderReactionButtons(comment)}</div>
                             <div class="message-meta">
                                 ${editedHtml}
                                 <span>${formatDate(comment.edited_at || comment.created_at)}</span>
@@ -961,6 +799,7 @@ HTML_TEMPLATE = """
                 commentsList.innerHTML = '<div class="empty">Пока нет комментариев. Можно написать первый.</div>';
                 return;
             }
+
             const sorted = [...latestComments].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
             const replyMap = {};
             const roots = [];
@@ -984,21 +823,18 @@ HTML_TEMPLATE = """
 
             try {
                 const url = new URL("/api/comments/" + encodeURIComponent(postId), window.location.origin);
-                if (initData) {
-                    url.searchParams.set("init_data", initData);
-                }
+                if (initData) url.searchParams.set("init_data", initData);
                 const response = await fetch(url);
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Ошибка загрузки");
-                postInfo = data.post || null;
-                if (postInfo && postInfo.post_text) {
+                if (data.post && data.post.post_text) {
                     postCard.hidden = false;
-                    postCardText.textContent = postInfo.post_text;
+                    postCardText.textContent = data.post.post_text;
                 } else {
                     postCard.hidden = true;
                 }
                 renderComments(data.comments || []);
-                bindLongPressHandlers();
+                bindContextHandlers();
             } catch (error) {
                 commentsList.innerHTML = '<div class="empty">Не удалось загрузить комментарии.</div>';
             }
@@ -1006,7 +842,6 @@ HTML_TEMPLATE = """
 
         async function sendComment() {
             const comment = commentInput.value.trim();
-
             if (!postId) {
                 showStatus("MAX не передал startapp", "error");
                 return;
@@ -1017,13 +852,11 @@ HTML_TEMPLATE = """
             }
             if (!comment && !selectedImage && !editingCommentId) {
                 showStatus("Введите комментарий или выберите фото", "error");
-                commentInput.focus();
                 return;
             }
 
             submitBtn.disabled = true;
             showStatus(editingCommentId ? "Сохраняем..." : "Отправляем...", "");
-
             try {
                 let response;
                 if (editingCommentId) {
@@ -1080,8 +913,8 @@ HTML_TEMPLATE = """
             commentInput.value = comment.comment || "";
             charCount.textContent = commentInput.value.length;
             submitBtn.textContent = "Сохранить";
-            commentInput.focus();
             replyBox.classList.remove("show");
+            commentInput.focus();
             showStatus("Редактирование комментария", "");
         }
 
@@ -1096,109 +929,72 @@ HTML_TEMPLATE = """
             commentInput.focus();
         }
 
-        async function toggleReaction(commentId, reaction) {
-            if (!initData) return;
-            try {
-                const response = await fetch("/api/comment/" + commentId + "/reaction", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ init_data: initData, reaction: reaction })
-                });
-                const data = await response.json();
-                if (!response.ok) throw new Error(data.error || "Ошибка реакции");
-                await loadComments();
-            } catch (error) {
-                showStatus(error.message || "Не удалось поставить реакцию", "error");
-            }
-        }
-
-        function openReactionMenu(commentId, targetElement) {
-            reactionMenuCommentId = commentId;
-            reactionMenu.innerHTML = reactionOptions.map((emoji) => {
-                return `<button type="button" onclick="pickReaction(${JSON.stringify(emoji)})">${emoji}</button>`;
-            }).join("");
-            const rect = targetElement.getBoundingClientRect();
-            reactionMenu.style.left = Math.max(8, rect.left) + "px";
-            reactionMenu.style.top = Math.max(8, rect.top - 58) + "px";
-            reactionMenu.classList.add("show");
-        }
-
-        function closeReactionMenu() {
-            reactionMenu.classList.remove("show");
-            reactionMenuCommentId = null;
-        }
-
-        function openActionMenu(commentId, targetElement) {
+        function openContextMenu(commentId, targetElement) {
             const comment = latestComments.find((item) => item.id === commentId);
             if (!comment) return;
-            actionMenuCommentId = commentId;
             const isMine = currentUser && comment.user_id === currentUser.user_id;
-            actionMenu.innerHTML = `
+            menuCommentId = commentId;
+            contextMenu.innerHTML = `
                 <button type="button" onclick="menuReply()">Ответить</button>
                 ${isMine ? '<button type="button" onclick="menuEdit()">Редактировать</button>' : ''}
                 ${isMine ? '<button type="button" onclick="menuDelete()">Удалить</button>' : ''}
             `;
             const rect = targetElement.getBoundingClientRect();
-            actionMenu.style.left = Math.max(8, rect.left) + "px";
-            actionMenu.style.top = Math.min(window.innerHeight - 180, rect.bottom + 8) + "px";
-            actionMenu.classList.add("show");
+            const left = Math.min(window.innerWidth - 220, Math.max(8, rect.left));
+            const top = Math.min(window.innerHeight - 180, Math.max(8, rect.top - 12));
+            contextMenu.style.left = left + "px";
+            contextMenu.style.top = top + "px";
+            contextMenu.classList.add("show");
         }
 
-        function closeActionMenu() {
-            actionMenu.classList.remove("show");
-            actionMenuCommentId = null;
+        function closeContextMenu() {
+            contextMenu.classList.remove("show");
+            menuCommentId = null;
         }
 
-        function bindLongPressHandlers() {
+        function bindContextHandlers() {
             document.querySelectorAll(".bubble[data-comment-id]").forEach((bubble) => {
                 const commentId = Number(bubble.dataset.commentId);
-                const start = (event) => {
-                    if (event.target.closest(".message-action, .message-delete")) return;
+                const start = () => {
                     clearTimeout(longPressTimer);
-                    longPressTimer = setTimeout(() => openReactionMenu(commentId, bubble), 450);
-                };
-                const clickOpen = (event) => {
-                    if (event.target.closest(".message-action, .message-delete")) return;
-                    closeReactionMenu();
-                    openActionMenu(commentId, bubble);
+                    longPressTimer = setTimeout(() => openContextMenu(commentId, bubble), 450);
                 };
                 const cancel = () => {
                     clearTimeout(longPressTimer);
                 };
+                const contextOpen = (event) => {
+                    event.preventDefault();
+                    cancel();
+                    openContextMenu(commentId, bubble);
+                };
                 bubble.onmousedown = start;
                 bubble.ontouchstart = start;
-                bubble.onclick = clickOpen;
                 bubble.onmouseup = cancel;
                 bubble.onmouseleave = cancel;
                 bubble.ontouchend = cancel;
                 bubble.ontouchcancel = cancel;
+                bubble.oncontextmenu = contextOpen;
             });
         }
 
-        async function pickReaction(reaction) {
-            if (!reactionMenuCommentId) return;
-            closeReactionMenu();
-            await toggleReaction(reactionMenuCommentId, reaction);
-        }
-
         function menuReply() {
-            if (!actionMenuCommentId) return;
-            const id = actionMenuCommentId;
-            closeActionMenu();
+            if (!menuCommentId) return;
+            const id = menuCommentId;
+            closeContextMenu();
             startReply(id);
         }
 
         function menuEdit() {
-            if (!actionMenuCommentId) return;
-            const id = actionMenuCommentId;
-            closeActionMenu();
+            if (!menuCommentId) return;
+            const id = menuCommentId;
+            closeContextMenu();
             startEdit(id);
         }
 
         async function menuDelete() {
-            if (!actionMenuCommentId) return;
-            const id = actionMenuCommentId;
-            closeActionMenu();
+            if (!menuCommentId) return;
+            const id = menuCommentId;
+            closeContextMenu();
             await deleteComment(id);
         }
 
@@ -1211,10 +1007,6 @@ HTML_TEMPLATE = """
             postId = getStartParam(appInstance);
             currentUser = getMaxUser(appInstance);
             await hydrateUserFromServer();
-
-            postLabel.textContent = postId ? "Пост: " + postId : "";
-            postLabel.textContent = "";
-            identity.textContent = currentUser ? "Автор: " + currentUser.username : "Автор: профиль MAX не найден";
 
             commentInput.addEventListener("input", () => {
                 charCount.textContent = commentInput.value.length;
@@ -1237,11 +1029,8 @@ HTML_TEMPLATE = """
                 setPreviewFromFile(null);
             });
             document.addEventListener("click", (event) => {
-                if (!reactionMenu.contains(event.target)) {
-                    closeReactionMenu();
-                }
-                if (!actionMenu.contains(event.target)) {
-                    closeActionMenu();
+                if (!contextMenu.contains(event.target)) {
+                    closeContextMenu();
                 }
             });
 
@@ -1249,11 +1038,6 @@ HTML_TEMPLATE = """
             setInterval(loadComments, 8000);
         }
 
-        window.deleteComment = deleteComment;
-        window.startEdit = startEdit;
-        window.startReply = startReply;
-        window.toggleReaction = toggleReaction;
-        window.pickReaction = pickReaction;
         window.menuReply = menuReply;
         window.menuEdit = menuEdit;
         window.menuDelete = menuDelete;
@@ -1278,6 +1062,31 @@ def get_max_session():
     return jsonify({"user": user})
 
 
+@app.route("/api/post", methods=["POST"])
+def register_post():
+    payload = request.get_json(silent=True) or {}
+    post_id = normalize_post_id(payload.get("post_id"))
+    source_post_id = str(payload.get("source_post_id") or "").strip()[:256]
+    post_text = (payload.get("post_text") or "").strip()[:4000]
+    if not post_id or not post_text:
+        return jsonify({"error": "Не переданы данные поста"}), 400
+
+    conn = get_db_connection()
+    conn.execute(
+        """
+        INSERT INTO posts (post_id, source_post_id, post_text, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(post_id) DO UPDATE SET
+            source_post_id = excluded.source_post_id,
+            post_text = excluded.post_text
+        """,
+        (post_id, source_post_id, post_text, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success"})
+
+
 @app.route("/api/comments/<path:post_id>")
 def get_comments_by_post(post_id):
     normalized_post_id = normalize_post_id(post_id)
@@ -1295,27 +1104,9 @@ def get_comments_by_post(post_id):
         (normalized_post_id,),
     ).fetchall()
     conn.close()
-    comments = [serialize_comment(row) for row in rows]
-    reactions_map = get_reactions_map(normalized_post_id)
-    comment_lookup = {comment["id"]: comment for comment in comments}
-    current_user = validate_max_init_data(request.args.get("init_data", ""))
-    current_user_id = (current_user or {}).get("user_id")
 
-    for comment in comments:
-        reaction_meta = reactions_map.get(comment["id"], {"counts": {}, "users": {}})
-        comment["reactions"] = reaction_meta["counts"]
-        comment["my_reactions"] = [
-            emoji for emoji, users in reaction_meta["users"].items()
-            if current_user_id and current_user_id in users
-        ]
-        if comment["parent_id"] and comment["parent_id"] in comment_lookup:
-            parent = comment_lookup[comment["parent_id"]]
-            comment["parent_preview"] = {
-                "username": parent["username"],
-                "comment": (parent["comment"] or "Фото")[:80],
-            }
-        else:
-            comment["parent_preview"] = None
+    row_lookup = {row["id"]: row for row in rows}
+    comments = [serialize_comment(row, row_lookup) for row in rows]
     return jsonify({"post_id": normalized_post_id, "post": get_post_info(normalized_post_id), "comments": comments})
 
 
@@ -1324,7 +1115,6 @@ def get_post_count(post_id):
     normalized_post_id = normalize_post_id(post_id)
     if not normalized_post_id:
         return jsonify({"error": "Не передан post_id"}), 400
-
     conn = get_db_connection()
     row = conn.execute("SELECT COUNT(*) AS count FROM comments WHERE post_id = ?", (normalized_post_id,)).fetchone()
     conn.close()
@@ -1349,38 +1139,23 @@ def add_comment():
         return jsonify({"error": str(error)}), 400
     if not comment and not image_path:
         return jsonify({"error": "Комментарий пустой"}), 400
-    normalized_parent_id = int(parent_id) if str(parent_id or "").isdigit() else None
 
+    normalized_parent_id = int(parent_id) if str(parent_id or "").isdigit() else None
     created_at = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO comments (post_id, user_id, username, comment, image_path, parent_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO comments (post_id, user_id, username, comment, image_path, parent_id, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (post_id, verified_user["user_id"], verified_user["username"], comment, image_path, normalized_parent_id, created_at),
+        (post_id, verified_user["user_id"], verified_user["username"], comment, image_path, normalized_parent_id, None, created_at),
     )
     conn.commit()
     comment_id = cursor.lastrowid
     conn.close()
 
-    return jsonify(
-        {
-            "status": "success",
-            "comment": {
-                "id": comment_id,
-                "post_id": post_id,
-                "user_id": verified_user["user_id"],
-                "username": verified_user["username"],
-                "comment": comment,
-                "image_url": build_file_url(image_path),
-                "parent_id": normalized_parent_id,
-                "edited_at": None,
-                "created_at": created_at,
-            },
-        }
-    )
+    return jsonify({"status": "success", "comment": {"id": comment_id}})
 
 
 @app.route("/api/comment/<int:comment_id>", methods=["PUT"])
@@ -1388,7 +1163,6 @@ def edit_comment(comment_id):
     payload = request.get_json(silent=True) or {}
     comment = normalize_comment(payload.get("comment"))
     verified_user = validate_max_init_data(payload.get("init_data", ""))
-
     if not verified_user:
         return jsonify({"error": "Не удалось подтвердить пользователя MAX"}), 400
 
@@ -1405,10 +1179,7 @@ def edit_comment(comment_id):
         return jsonify({"error": "Комментарий пустой"}), 400
 
     edited_at = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "UPDATE comments SET comment = ?, edited_at = ? WHERE id = ?",
-        (comment, edited_at, comment_id),
-    )
+    conn.execute("UPDATE comments SET comment = ?, edited_at = ? WHERE id = ?", (comment, edited_at, comment_id))
     conn.commit()
     conn.close()
     return jsonify({"status": "success", "edited_at": edited_at})
@@ -1419,7 +1190,6 @@ def delete_comment(comment_id):
     payload = request.get_json(silent=True) or {}
     verified_user = validate_max_init_data(payload.get("init_data", ""))
     user_id = (verified_user or {}).get("user_id") or (payload.get("user_id") or "").strip()[:128]
-
     if not user_id:
         return jsonify({"error": "Не передан user_id"}), 400
 
@@ -1429,83 +1199,14 @@ def delete_comment(comment_id):
         conn.close()
         return jsonify({"error": "Комментарий не найден или нет прав"}), 404
 
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM comments WHERE id = ? AND user_id = ?", (comment_id, user_id))
+    conn.execute("DELETE FROM comments WHERE id = ? AND user_id = ?", (comment_id, user_id))
     conn.commit()
     conn.close()
 
-    image_path = row["image_path"]
-    if image_path:
-        image_file = os.path.join(UPLOAD_DIR, image_path)
-        if os.path.exists(image_file):
-            os.remove(image_file)
-    return jsonify({"status": "success"})
-
-
-@app.route("/api/comment/<int:comment_id>/reaction", methods=["POST"])
-def toggle_comment_reaction(comment_id):
-    payload = request.get_json(silent=True) or {}
-    verified_user = validate_max_init_data(payload.get("init_data", ""))
-    reaction = (payload.get("reaction") or "").strip()[:8]
-
-    if not verified_user:
-        return jsonify({"error": "Не удалось подтвердить пользователя MAX"}), 400
-    if not reaction:
-        return jsonify({"error": "Недопустимая реакция"}), 400
-
-    conn = get_db_connection()
-    comment = conn.execute("SELECT id FROM comments WHERE id = ?", (comment_id,)).fetchone()
-    if not comment:
-        conn.close()
-        return jsonify({"error": "Комментарий не найден"}), 404
-
-    exists = conn.execute(
-        "SELECT 1 FROM comment_reactions WHERE comment_id = ? AND user_id = ? AND reaction = ?",
-        (comment_id, verified_user["user_id"], reaction),
-    ).fetchone()
-    if exists:
-        conn.execute(
-            "DELETE FROM comment_reactions WHERE comment_id = ? AND user_id = ? AND reaction = ?",
-            (comment_id, verified_user["user_id"], reaction),
-        )
-        active = False
-    else:
-        conn.execute(
-            """
-            INSERT INTO comment_reactions (comment_id, user_id, reaction, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (comment_id, verified_user["user_id"], reaction, datetime.now(timezone.utc).isoformat()),
-        )
-        active = True
-    conn.commit()
-    conn.close()
-    return jsonify({"status": "success", "active": active})
-
-
-@app.route("/api/post", methods=["POST"])
-def register_post():
-    payload = request.get_json(silent=True) or {}
-    post_id = normalize_post_id(payload.get("post_id"))
-    source_post_id = str(payload.get("source_post_id") or "").strip()[:256]
-    post_text = (payload.get("post_text") or "").strip()[:4000]
-
-    if not post_id or not post_text:
-        return jsonify({"error": "Не переданы данные поста"}), 400
-
-    conn = get_db_connection()
-    conn.execute(
-        """
-        INSERT INTO posts (post_id, source_post_id, post_text, created_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(post_id) DO UPDATE SET
-            source_post_id = excluded.source_post_id,
-            post_text = excluded.post_text
-        """,
-        (post_id, source_post_id, post_text, datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-    conn.close()
+    if row["image_path"]:
+        file_path = os.path.join(UPLOAD_DIR, row["image_path"])
+        if os.path.exists(file_path):
+            os.remove(file_path)
     return jsonify({"status": "success"})
 
 
