@@ -624,28 +624,6 @@ HTML_TEMPLATE = """
             background: rgba(255, 255, 255, 0.08);
         }
 
-        .scroll-nav {
-            position: fixed;
-            right: max(12px, calc((100vw - min(760px, 100vw)) / 2 + 12px));
-            bottom: calc(86px + env(safe-area-inset-bottom));
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            z-index: 20;
-        }
-
-        .scroll-btn {
-            width: 42px;
-            height: 42px;
-            border: none;
-            border-radius: 50%;
-            background: rgba(46, 166, 255, 0.92);
-            color: white;
-            font-size: 18px;
-            cursor: pointer;
-            box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
-        }
-
         .jump-highlight {
             outline: 2px solid rgba(46, 166, 255, 0.95);
             box-shadow: 0 0 0 6px rgba(46, 166, 255, 0.18);
@@ -713,10 +691,6 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="context-menu" id="contextMenu"></div>
-    <div class="scroll-nav">
-        <button class="scroll-btn" id="scrollUpBtn" type="button">↑</button>
-        <button class="scroll-btn" id="scrollDownBtn" type="button">↓</button>
-    </div>
 
     <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
@@ -734,8 +708,6 @@ HTML_TEMPLATE = """
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
         const contextMenu = document.getElementById("contextMenu");
-        const scrollUpBtn = document.getElementById("scrollUpBtn");
-        const scrollDownBtn = document.getElementById("scrollDownBtn");
 
         let initData = "";
         let postId = "";
@@ -746,7 +718,6 @@ HTML_TEMPLATE = """
         let latestComments = [];
         let menuCommentId = null;
         let longPressTimer = null;
-        let wasNearBottom = true;
 
         function resolveWebAppObject() {
             if (window.WebApp) return window.WebApp;
@@ -763,16 +734,6 @@ HTML_TEMPLATE = """
         function showStatus(message, type) {
             status.textContent = message;
             status.className = "status " + type;
-        }
-
-        function isNearBottom() {
-            return window.innerHeight + window.scrollY >= document.body.offsetHeight - 140;
-        }
-
-        function scrollToBottom(force = false) {
-            if (force || isNearBottom()) {
-                window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
-            }
         }
 
         function jumpToComment(commentId) {
@@ -897,7 +858,6 @@ HTML_TEMPLATE = """
         }
 
         function renderComments(comments) {
-            const keepBottom = wasNearBottom;
             latestComments = comments || [];
             if (!latestComments.length) {
                 commentsList.innerHTML = '<div class="empty">Пока нет комментариев. Можно написать первый.</div>';
@@ -915,13 +875,7 @@ HTML_TEMPLATE = """
                     roots.push(comment);
                 }
             });
-
             commentsList.innerHTML = roots.map((comment) => renderCommentNode(comment, replyMap)).join("");
-            requestAnimationFrame(() => {
-                if (keepBottom) {
-                    scrollToBottom(true);
-                }
-            });
         }
 
         async function loadComments() {
@@ -931,7 +885,6 @@ HTML_TEMPLATE = """
             }
 
             try {
-                wasNearBottom = isNearBottom();
                 const url = new URL("/api/comments/" + encodeURIComponent(postId), window.location.origin);
                 if (initData) url.searchParams.set("init_data", initData);
                 const response = await fetch(url);
@@ -1143,8 +1096,6 @@ HTML_TEMPLATE = """
                     closeContextMenu();
                 }
             });
-            scrollUpBtn.addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
-            scrollDownBtn.addEventListener("click", () => scrollToBottom(true));
 
             await loadComments();
             setInterval(loadComments, 8000);
