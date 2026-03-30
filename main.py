@@ -1,13 +1,11 @@
 from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 from datetime import datetime
-import os
 import json
 
 app = Flask(__name__)
 DB_PATH = "comments.db"
 
-# ---------------- Инициализация базы ----------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -18,14 +16,10 @@ def init_db():
         parent_id INTEGER DEFAULT 0,
         user_id TEXT NOT NULL,
         username TEXT NOT NULL,
-        avatar_color TEXT,
-        comment TEXT,
-        media_type TEXT,
-        media_data TEXT,
+        comment TEXT NOT NULL,
         likes INTEGER DEFAULT 0,
         liked_by TEXT DEFAULT '[]',
-        created_at TEXT NOT NULL,
-        updated_at TEXT
+        created_at TEXT NOT NULL
     )
     """)
     conn.commit()
@@ -33,7 +27,6 @@ def init_db():
 
 init_db()
 
-# ---------------- HTML шаблон ----------------
 HTML = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -59,7 +52,7 @@ HTML = """
         
         .chat-header {
             background: #1e1e22;
-            padding: 14px 16px;
+            padding: 12px 16px;
             border-bottom: 1px solid #2a2a2e;
             display: flex;
             align-items: center;
@@ -79,15 +72,7 @@ HTML = """
         .chat-title {
             flex: 1;
             font-weight: 600;
-            font-size: 17px;
-        }
-        
-        .post-id {
-            font-size: 11px;
-            color: #8e8e93;
-            background: #2c2c30;
-            padding: 4px 10px;
-            border-radius: 20px;
+            font-size: 16px;
         }
         
         .messages-area {
@@ -103,7 +88,6 @@ HTML = """
             display: flex;
             gap: 10px;
             max-width: 100%;
-            animation: fadeIn 0.2s ease;
         }
         
         .message-avatar {
@@ -161,20 +145,6 @@ HTML = """
             margin: 4px 0;
         }
         
-        .message-media {
-            margin-top: 6px;
-            max-width: 250px;
-            border-radius: 12px;
-            overflow: hidden;
-        }
-        
-        .message-media img, .message-media video {
-            max-width: 100%;
-            max-height: 200px;
-            border-radius: 12px;
-            cursor: pointer;
-        }
-        
         .message-actions {
             display: flex;
             gap: 12px;
@@ -189,9 +159,6 @@ HTML = """
             cursor: pointer;
             font-size: 12px;
             padding: 2px 0;
-            display: flex;
-            align-items: center;
-            gap: 4px;
         }
         
         .like-btn.liked {
@@ -202,19 +169,19 @@ HTML = """
             color: #0a84ff;
         }
         
-        .replies-container {
-            margin-left: 46px;
-            margin-top: 8px;
-            display: none;
-        }
-        
         .reply-toggle {
             font-size: 11px;
             color: #8e8e93;
             cursor: pointer;
-            margin-top: 4px;
             margin-left: 46px;
+            margin-top: 4px;
             display: inline-block;
+        }
+        
+        .replies-container {
+            margin-left: 46px;
+            margin-top: 8px;
+            display: none;
         }
         
         .empty-state {
@@ -233,28 +200,15 @@ HTML = """
             flex-shrink: 0;
         }
         
-        .attach-btn {
-            background: none;
-            border: none;
-            color: #0a84ff;
-            font-size: 24px;
-            cursor: pointer;
-            padding: 8px;
-            line-height: 1;
-        }
-        
         .input-wrapper {
             flex: 1;
             background: #2c2c30;
             border-radius: 24px;
             padding: 8px 16px;
-            display: flex;
-            align-items: flex-end;
-            gap: 8px;
         }
         
         .input-wrapper textarea {
-            flex: 1;
+            width: 100%;
             background: none;
             border: none;
             color: #e4e6eb;
@@ -322,31 +276,25 @@ HTML = """
             opacity: 1;
         }
         
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(5px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #8e8e93;
-        }
-        
-        #fileInput {
-            display: none;
+        .refresh-btn {
+            background: none;
+            border: none;
+            color: #0a84ff;
+            font-size: 14px;
+            cursor: pointer;
+            padding: 4px 8px;
         }
     </style>
 </head>
 <body>
     <div class="chat-header">
         <button class="back-btn" onclick="closeApp()">←</button>
-        <div class="chat-title">💬 Обсуждение</div>
-        <div class="post-id" id="postIdDisplay"></div>
+        <div class="chat-title">💬 Комментарии</div>
+        <button class="refresh-btn" onclick="loadMessages()">🔄</button>
     </div>
     
     <div id="messagesContainer" class="messages-area">
-        <div class="loading">Загрузка сообщений...</div>
+        <div class="empty-state">Загрузка...</div>
     </div>
     
     <div id="replyIndicator" class="reply-indicator">
@@ -355,7 +303,6 @@ HTML = """
     </div>
     
     <div class="input-bar">
-        <button class="attach-btn" onclick="attachMedia()">📎</button>
         <div class="input-wrapper">
             <textarea id="messageInput" placeholder="Сообщение..." rows="1"></textarea>
         </div>
@@ -364,71 +311,32 @@ HTML = """
         </button>
     </div>
     
-    <input type="file" id="fileInput" accept="image/*,video/*" onchange="handleFile()">
     <div id="status" class="status"></div>
 
     <script>
-        // Получаем post_id из URL
+        // Получаем ID поста из URL
         const urlParams = new URLSearchParams(window.location.search);
         let postId = urlParams.get('startapp') || urlParams.get('post') || 'general';
-        document.getElementById('postIdDisplay').innerHTML = postId.length > 30 ? postId.substring(0, 30)+'...' : postId;
         
-        // ⭐ ПОЛУЧАЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ ИЗ MAX ⭐
-        let userId = null;
-        let userName = null;
-        
-        // Пытаемся получить данные из MAX WebApp
-        try {
-            if (window.Maxi && window.Maxi.getUser) {
-                window.Maxi.getUser(function(user) {
-                    if (user && user.id) {
-                        userId = user.id.toString();
-                        userName = user.first_name + (user.last_name ? ' ' + user.last_name : '');
-                        localStorage.setItem('comment_user_id', userId);
-                        localStorage.setItem('comment_username', userName);
-                    } else {
-                        useLocalStorage();
-                    }
-                });
-            } else {
-                useLocalStorage();
-            }
-        } catch(e) {
-            console.log('MAX API не доступен, используем localStorage');
-            useLocalStorage();
+        // ⭐ ПРОСТАЯ СХЕМА: имя пользователя через localStorage
+        let userId = localStorage.getItem('comment_user_id');
+        if (!userId) {
+            userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+            localStorage.setItem('comment_user_id', userId);
         }
         
-        function useLocalStorage() {
-            userId = localStorage.getItem('comment_user_id');
-            if (!userId) {
-                userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
-                localStorage.setItem('comment_user_id', userId);
-            }
-            
-            userName = localStorage.getItem('comment_username');
-            if (!userName) {
-                userName = 'Гость_' + userId.substr(-4);
-                localStorage.setItem('comment_username', userName);
-            }
+        let userName = localStorage.getItem('comment_username');
+        if (!userName) {
+            userName = prompt('Введите ваше имя:', 'Гость');
+            if (!userName) userName = 'Гость';
+            localStorage.setItem('comment_username', userName);
         }
         
-        // Если данные ещё не загружены, ждём 1 секунду и используем localStorage
-        setTimeout(function() {
-            if (!userId || !userName) {
-                useLocalStorage();
-            }
-        }, 1000);
-        
-        // Переменные для ответа
         let replyToId = null;
         let replyToName = null;
         
-        // Для медиа
-        let pendingMedia = null;
-        let pendingMediaType = null;
-        
-        // Авто-расширение textarea
         const messageInput = document.getElementById('messageInput');
+        
         messageInput.addEventListener('input', function() {
             this.style.height = 'auto';
             this.style.height = Math.min(this.scrollHeight, 100) + 'px';
@@ -440,24 +348,6 @@ HTML = """
                 sendMessage();
             }
         });
-        
-        function attachMedia() {
-            document.getElementById('fileInput').click();
-        }
-        
-        function handleFile() {
-            const file = document.getElementById('fileInput').files[0];
-            if (!file) return;
-            
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                pendingMedia = e.target.result;
-                pendingMediaType = file.type.startsWith('image/') ? 'image' : 'video';
-                showStatus('📎 Файл прикреплён. Отправьте сообщение.', 'success');
-            };
-            reader.readAsDataURL(file);
-            document.getElementById('fileInput').value = '';
-        }
         
         function getAvatarColor(name) {
             let hash = 0;
@@ -477,37 +367,33 @@ HTML = """
                 
                 if (data.comments && data.comments.length > 0) {
                     container.innerHTML = '';
-                    const commentsMap = new Map();
-                    const rootComments = [];
-                    
-                    data.comments.forEach(c => {
-                        c.replies = [];
-                        commentsMap.set(c.id, c);
-                        if (c.parent_id === 0) {
-                            rootComments.push(c);
-                        }
-                    });
-                    
-                    data.comments.forEach(c => {
-                        if (c.parent_id !== 0 && commentsMap.has(c.parent_id)) {
-                            commentsMap.get(c.parent_id).replies.push(c);
-                        }
-                    });
+                    const rootComments = data.comments.filter(c => c.parent_id === 0);
+                    const replies = data.comments.filter(c => c.parent_id !== 0);
                     
                     rootComments.forEach(c => {
                         addMessageToDOM(c);
-                        if (c.replies && c.replies.length > 0) {
+                        const childReplies = replies.filter(r => r.parent_id === c.id);
+                        if (childReplies.length > 0) {
                             const toggle = document.createElement('div');
                             toggle.className = 'reply-toggle';
-                            toggle.textContent = `▼ ${c.replies.length} ответов`;
-                            toggle.onclick = () => toggleReplies(c.id, toggle);
+                            toggle.textContent = `▼ ${childReplies.length} ответов`;
+                            toggle.onclick = () => {
+                                const repliesDiv = document.getElementById(`replies-${c.id}`);
+                                if (repliesDiv.style.display === 'none') {
+                                    repliesDiv.style.display = 'block';
+                                    toggle.textContent = `▲ ${childReplies.length} ответов`;
+                                } else {
+                                    repliesDiv.style.display = 'none';
+                                    toggle.textContent = `▼ ${childReplies.length} ответов`;
+                                }
+                            };
                             container.appendChild(toggle);
                             
                             const repliesDiv = document.createElement('div');
                             repliesDiv.id = `replies-${c.id}`;
                             repliesDiv.className = 'replies-container';
                             repliesDiv.style.display = 'none';
-                            c.replies.forEach(reply => addReplyToContainer(repliesDiv, reply));
+                            childReplies.forEach(r => addReplyToDOM(repliesDiv, r));
                             container.appendChild(repliesDiv);
                         }
                     });
@@ -524,17 +410,11 @@ HTML = """
         function addMessageToDOM(comment) {
             const container = document.getElementById('messagesContainer');
             const time = new Date(comment.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-            const avatarColor = comment.avatar_color || getAvatarColor(comment.username);
+            const avatarColor = getAvatarColor(comment.username);
             const letter = (comment.username.charAt(0) || '?').toUpperCase();
             const isMine = comment.user_id === userId;
-            
-            // Безопасный парсинг liked_by
             let likedBy = [];
-            try {
-                likedBy = typeof comment.liked_by === 'string' ? JSON.parse(comment.liked_by) : (comment.liked_by || []);
-            } catch(e) {
-                likedBy = [];
-            }
+            try { likedBy = JSON.parse(comment.liked_by || '[]'); } catch(e) {}
             const isLiked = likedBy.includes(userId);
             
             const div = document.createElement('div');
@@ -548,18 +428,11 @@ HTML = """
                         ${isMine ? '<span class="message-badge">Вы</span>' : ''}
                         <span class="message-time">${time}</span>
                     </div>
-                    <div class="message-text">${comment.comment ? escapeHtml(comment.comment) : ''}</div>
-                    ${comment.media_data ? `
-                        <div class="message-media">
-                            ${comment.media_type === 'image' ? 
-                                `<img src="${comment.media_data}" onclick="viewMedia('${comment.media_data}')">` : 
-                                `<video controls src="${comment.media_data}" onclick="viewMedia('${comment.media_data}')"></video>`}
-                        </div>
-                    ` : ''}
+                    <div class="message-text">${escapeHtml(comment.comment)}</div>
                     <div class="message-actions">
                         <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="likeComment(${comment.id})">❤️ ${comment.likes || 0}</button>
                         <button class="reply-btn" onclick="setReply(${comment.id}, '${escapeHtml(comment.username)}')">💬 Ответить</button>
-                        ${isMine ? `<button onclick="editComment(${comment.id}, '${escapeHtml(comment.comment || '').replace(/'/g, "\\'")}')">✏️</button>` : ''}
+                        ${isMine ? `<button onclick="editComment(${comment.id}, '${escapeHtml(comment.comment).replace(/'/g, "\\'")}')">✏️</button>` : ''}
                         ${isMine ? `<button onclick="deleteComment(${comment.id})">🗑</button>` : ''}
                     </div>
                 </div>
@@ -567,23 +440,17 @@ HTML = """
             container.appendChild(div);
         }
         
-        function addReplyToContainer(container, reply) {
+        function addReplyToDOM(container, reply) {
             const time = new Date(reply.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-            const avatarColor = reply.avatar_color || getAvatarColor(reply.username);
+            const avatarColor = getAvatarColor(reply.username);
             const letter = (reply.username.charAt(0) || '?').toUpperCase();
             const isMine = reply.user_id === userId;
-            
             let likedBy = [];
-            try {
-                likedBy = typeof reply.liked_by === 'string' ? JSON.parse(reply.liked_by) : (reply.liked_by || []);
-            } catch(e) {
-                likedBy = [];
-            }
+            try { likedBy = JSON.parse(reply.liked_by || '[]'); } catch(e) {}
             const isLiked = likedBy.includes(userId);
             
             const div = document.createElement('div');
             div.className = 'message';
-            div.id = `msg-${reply.id}`;
             div.style.marginTop = '8px';
             div.innerHTML = `
                 <div class="message-avatar" style="background: ${avatarColor}">${escapeHtml(letter)}</div>
@@ -593,34 +460,16 @@ HTML = """
                         ${isMine ? '<span class="message-badge">Вы</span>' : ''}
                         <span class="message-time">${time}</span>
                     </div>
-                    <div class="message-text">${reply.comment ? escapeHtml(reply.comment) : ''}</div>
-                    ${reply.media_data ? `
-                        <div class="message-media">
-                            ${reply.media_type === 'image' ? 
-                                `<img src="${reply.media_data}" onclick="viewMedia('${reply.media_data}')">` : 
-                                `<video controls src="${reply.media_data}" onclick="viewMedia('${reply.media_data}')"></video>`}
-                        </div>
-                    ` : ''}
+                    <div class="message-text">${escapeHtml(reply.comment)}</div>
                     <div class="message-actions">
                         <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="likeComment(${reply.id})">❤️ ${reply.likes || 0}</button>
                         <button class="reply-btn" onclick="setReply(${reply.id}, '${escapeHtml(reply.username)}')">💬 Ответить</button>
-                        ${isMine ? `<button onclick="editComment(${reply.id}, '${escapeHtml(reply.comment || '').replace(/'/g, "\\'")}')">✏️</button>` : ''}
+                        ${isMine ? `<button onclick="editComment(${reply.id}, '${escapeHtml(reply.comment).replace(/'/g, "\\'")}')">✏️</button>` : ''}
                         ${isMine ? `<button onclick="deleteComment(${reply.id})">🗑</button>` : ''}
                     </div>
                 </div>
             `;
             container.appendChild(div);
-        }
-        
-        function toggleReplies(parentId, toggleBtn) {
-            const repliesDiv = document.getElementById(`replies-${parentId}`);
-            if (repliesDiv.style.display === 'none') {
-                repliesDiv.style.display = 'block';
-                toggleBtn.textContent = toggleBtn.textContent.replace('▼', '▲');
-            } else {
-                repliesDiv.style.display = 'none';
-                toggleBtn.textContent = toggleBtn.textContent.replace('▲', '▼');
-            }
         }
         
         function setReply(id, name) {
@@ -639,31 +488,18 @@ HTML = """
         
         async function sendMessage() {
             const text = messageInput.value.trim();
-            if (!text && !pendingMedia) {
+            if (!text) {
                 showStatus('Напишите сообщение', 'error');
                 return;
-            }
-            
-            // Ждём, пока загрузятся данные пользователя
-            if (!userId || !userName) {
-                await new Promise(resolve => setTimeout(resolve, 500));
-                if (!userId || !userName) {
-                    useLocalStorage();
-                }
             }
             
             const data = {
                 post_id: postId,
                 user_id: userId,
                 username: userName,
-                comment: text || ''
+                comment: text
             };
-            
             if (replyToId) data.parent_id = replyToId;
-            if (pendingMedia) {
-                data.media_type = pendingMediaType;
-                data.media_data = pendingMedia;
-            }
             
             try {
                 const response = await fetch('/api/comment', {
@@ -675,63 +511,48 @@ HTML = """
                 if (response.ok) {
                     messageInput.value = '';
                     messageInput.style.height = 'auto';
-                    pendingMedia = null;
-                    pendingMediaType = null;
                     cancelReply();
                     await loadMessages();
+                    showStatus('✅ Отправлено!', 'success');
                 } else {
-                    showStatus('Ошибка отправки', 'error');
+                    showStatus('❌ Ошибка', 'error');
                 }
             } catch (error) {
-                showStatus('Ошибка соединения', 'error');
+                showStatus('❌ Ошибка соединения', 'error');
             }
         }
         
         async function likeComment(id) {
-            if (!userId) return;
             try {
-                const response = await fetch(`/api/comment/${id}/like`, {
+                await fetch(`/api/comment/${id}/like`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user_id: userId })
                 });
-                if (response.ok) {
-                    loadMessages();
-                }
-            } catch(e) { 
-                console.error(e); 
-                showStatus('Ошибка лайка', 'error');
-            }
+                loadMessages();
+            } catch(e) { console.error(e); }
         }
         
         async function editComment(id, oldText) {
-            const newText = prompt('Редактировать сообщение:', oldText);
-            if (newText && newText.trim() !== '') {
-                try {
-                    await fetch(`/api/comment/${id}`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ comment: newText.trim(), user_id: userId })
-                    });
-                    loadMessages();
-                } catch(e) { showStatus('Ошибка', 'error'); }
+            const newText = prompt('Редактировать:', oldText);
+            if (newText && newText.trim()) {
+                await fetch(`/api/comment/${id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ comment: newText.trim(), user_id: userId })
+                });
+                loadMessages();
             }
         }
         
         async function deleteComment(id) {
-            if (!confirm('Удалить сообщение?')) return;
-            try {
-                await fetch(`/api/comment/${id}`, {
-                    method: 'DELETE',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId })
-                });
-                loadMessages();
-            } catch(e) { showStatus('Ошибка', 'error'); }
-        }
-        
-        function viewMedia(url) {
-            window.open(url, '_blank');
+            if (!confirm('Удалить?')) return;
+            await fetch(`/api/comment/${id}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId })
+            });
+            loadMessages();
         }
         
         function closeApp() {
@@ -752,13 +573,11 @@ HTML = """
         }
         
         loadMessages();
-        setInterval(loadMessages, 5000);
     </script>
 </body>
 </html>
 """
 
-# ---------------- API ----------------
 @app.route('/')
 def index():
     return render_template_string(HTML)
@@ -767,27 +586,10 @@ def index():
 def get_comments(post_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""
-        SELECT id, parent_id, user_id, username, comment, media_type, media_data, likes, liked_by, created_at
-        FROM comments WHERE post_id = ? ORDER BY created_at ASC
-    """, (post_id,))
+    c.execute("SELECT id, parent_id, user_id, username, comment, likes, liked_by, created_at FROM comments WHERE post_id = ? ORDER BY created_at ASC", (post_id,))
     rows = c.fetchall()
     conn.close()
-    
-    comments = []
-    for r in rows:
-        comments.append({
-            "id": r[0],
-            "parent_id": r[1] or 0,
-            "user_id": r[2],
-            "username": r[3],
-            "comment": r[4] or "",
-            "media_type": r[5],
-            "media_data": r[6],
-            "likes": r[7],
-            "liked_by": r[8],
-            "created_at": r[9]
-        })
+    comments = [{"id": r[0], "parent_id": r[1] or 0, "user_id": r[2], "username": r[3], "comment": r[4], "likes": r[5], "liked_by": r[6], "created_at": r[7]} for r in rows]
     return jsonify({"comments": comments})
 
 @app.route('/api/comment', methods=['POST'])
@@ -795,20 +597,8 @@ def add_comment():
     data = request.get_json()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""
-        INSERT INTO comments (post_id, parent_id, user_id, username, comment, media_type, media_data, created_at, liked_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        data["post_id"],
-        data.get("parent_id", 0),
-        data["user_id"],
-        data["username"],
-        data.get("comment", ""),
-        data.get("media_type"),
-        data.get("media_data"),
-        datetime.now().isoformat(),
-        json.dumps([])
-    ))
+    c.execute("INSERT INTO comments (post_id, parent_id, user_id, username, comment, created_at, liked_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (data["post_id"], data.get("parent_id", 0), data["user_id"], data["username"], data["comment"], datetime.now().isoformat(), json.dumps([])))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
@@ -822,18 +612,12 @@ def like_comment(id):
     c.execute("SELECT liked_by FROM comments WHERE id = ?", (id,))
     row = c.fetchone()
     if row:
-        try:
-            liked_by = json.loads(row[0]) if row[0] else []
-        except:
-            liked_by = []
-        
+        liked_by = json.loads(row[0]) if row[0] else []
         if user_id in liked_by:
             liked_by.remove(user_id)
         else:
             liked_by.append(user_id)
-        
-        c.execute("UPDATE comments SET likes = ?, liked_by = ? WHERE id = ?", 
-                  (len(liked_by), json.dumps(liked_by), id))
+        c.execute("UPDATE comments SET likes = ?, liked_by = ? WHERE id = ?", (len(liked_by), json.dumps(liked_by), id))
         conn.commit()
     conn.close()
     return jsonify({"ok": True})
@@ -843,8 +627,7 @@ def edit_comment(id):
     data = request.get_json()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("UPDATE comments SET comment = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-              (data["comment"], datetime.now().isoformat(), id, data["user_id"]))
+    c.execute("UPDATE comments SET comment = ? WHERE id = ? AND user_id = ?", (data["comment"], id, data["user_id"]))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
