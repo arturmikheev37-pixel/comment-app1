@@ -261,6 +261,7 @@ HTML_TEMPLATE = """
             --tg-accent: #2ea6ff;
             --tg-text: #ffffff;
             --tg-muted: #8e9aa5;
+            --composer-space: 120px;
         }
 
         * {
@@ -351,7 +352,7 @@ HTML_TEMPLATE = """
 
         .feed {
             flex: 1;
-            padding: 2px 12px 92px;
+            padding: 2px 12px calc(var(--composer-space) + 12px);
             display: flex;
             flex-direction: column;
             gap: 8px;
@@ -708,6 +709,7 @@ HTML_TEMPLATE = """
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
         const contextMenu = document.getElementById("contextMenu");
+        const composer = document.querySelector(".composer");
 
         let initData = "";
         let postId = "";
@@ -734,6 +736,11 @@ HTML_TEMPLATE = """
         function showStatus(message, type) {
             status.textContent = message;
             status.className = "status " + type;
+        }
+
+        function syncComposerSpace() {
+            const height = composer ? composer.offsetHeight : 120;
+            document.documentElement.style.setProperty("--composer-space", `${height}px`);
         }
 
         function jumpToComment(commentId) {
@@ -827,6 +834,7 @@ HTML_TEMPLATE = """
             submitBtn.textContent = "Отправить";
             replyBox.classList.remove("show");
             replyBox.textContent = "";
+            syncComposerSpace();
         }
 
         function renderCommentNode(comment, replyMap) {
@@ -979,6 +987,7 @@ HTML_TEMPLATE = """
             replyBox.classList.remove("show");
             commentInput.focus();
             showStatus("Редактирование комментария", "");
+            syncComposerSpace();
         }
 
         function startReply(commentId) {
@@ -990,6 +999,7 @@ HTML_TEMPLATE = """
             replyBox.classList.add("show");
             replyBox.textContent = `Ответ для ${comment.username}: ${comment.comment || "фото"}`;
             commentInput.focus();
+            syncComposerSpace();
         }
 
         function openContextMenu(commentId, targetElement) {
@@ -1073,6 +1083,7 @@ HTML_TEMPLATE = """
 
             commentInput.addEventListener("input", () => {
                 charCount.textContent = commentInput.value.length;
+                syncComposerSpace();
             });
             commentInput.addEventListener("keydown", (event) => {
                 if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -1090,13 +1101,16 @@ HTML_TEMPLATE = """
                 selectedImage = null;
                 imageInput.value = "";
                 setPreviewFromFile(null);
+                syncComposerSpace();
             });
             document.addEventListener("click", (event) => {
                 if (!contextMenu.contains(event.target)) {
                     closeContextMenu();
                 }
             });
+            window.addEventListener("resize", syncComposerSpace);
 
+            syncComposerSpace();
             await loadComments();
             setInterval(loadComments, 8000);
         }
