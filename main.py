@@ -1,14 +1,10 @@
 from flask import Flask, request, jsonify, render_template_string
-from flask_socketio import SocketIO, emit, join_room
 import sqlite3
 from datetime import datetime
 import json
 import os
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.urandom(24)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
-
 DB_PATH = "comments.db"
 
 def init_db():
@@ -40,7 +36,6 @@ HTML = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
     <title>Комментарии</title>
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -294,6 +289,20 @@ HTML = """
             from { opacity: 0; transform: translateY(5px); }
             to { opacity: 1; transform: translateY(0); }
         }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #8e8e93;
+        }
+        
+        .refresh-indicator {
+            text-align: center;
+            font-size: 10px;
+            color: #5e5e66;
+            padding: 4px;
+            margin-top: 8px;
+        }
     </style>
 </head>
 <body>
@@ -304,7 +313,11 @@ HTML = """
     </div>
     
     <div id="messagesContainer" class="messages-area">
-        <div class="empty-state">Загрузка...</div>
+        <div class="loading">Загрузка...</div>
+    </div>
+    
+    <div class="refresh-indicator" id="refreshIndicator">
+        🔄 обновлено только что
     </div>
     
     <div id="replyIndicator" class="reply-indicator">
@@ -360,15 +373,17 @@ HTML = """
                 localStorage.setItem('comment_username', userName);
             }
             
-            document.getElementById('userNameDisplay').innerHTML = `👤 ${userName} (локально)`;
+            document.getElementById('userNameDisplay').innerHTML = `👤 ${userName}`;
         }
         
         console.log('Пользователь:', userId, userName);
         
         let replyToId = null;
         let replyToName = null;
+        let lastUpdateTime = Date.now();
         
         const messageInput = document.getElementById('messageInput');
+        const refreshIndicator = document.getElementById('refreshIndicator');
         
         messageInput.addEventListener('input', function() {
             this.style.height = 'auto';
@@ -382,25 +397,6 @@ HTML = """
             }
         });
         
-        // ========== WEBSOCKET ==========
-        const socket = io();
-        socket.emit('join', postId);
-        
-        socket.on('new_comment', function(comment) {
-            console.log('Новый комментарий:', comment);
-            addCommentToTop(comment);
-        });
-        
-        socket.on('comment_updated', function(comment) {
-            console.log('Комментарий обновлён:', comment);
-            updateCommentInDOM(comment);
-        });
-        
-        socket.on('comment_deleted', function(commentId) {
-            console.log('Комментарий удалён:', commentId);
-            removeCommentFromDOM(commentId);
-        });
-        
         function getAvatarColor(name) {
             let hash = 0;
             for (let i = 0; i < name.length; i++) {
@@ -411,57 +407,98 @@ HTML = """
             return colors[Math.abs(hash) % colors.length];
         }
         
+        function updateRefreshIndicator() {
+            const now = Date.now();
+            const seconds = Math.floor((now - lastUpdateTime) / 1000);
+            if (seconds < 3) {
+                refreshIndicator.innerHTML = '🔄 обновлено только что';
+            } else {
+                refreshIndicator.innerHTML = `🔄 обновлено ${seconds} сек назад`;
+            }
+        }
+        
         // ========== ЗАГРУЗКА КОММЕНТАРИЕВ ==========
+        let isLoading = false;
+        let lastCommentCount = 0;
+        
         async function loadMessages() {
+            if (isLoading) return;
+            isLoading = true;
+            
             try {
                 const response = await fetch(`/api/comments/${encodeURIComponent(postId)}`);
                 const data = await response.json();
                 const container = document.getElementById('messagesContainer');
                 
                 if (data.comments && data.comments.length > 0) {
-                    container.innerHTML = '';
-                    const rootComments = data.comments.filter(c => c.parent_id === 0);
-                    const replies = data.comments.filter(c => c.parent_id !== 0);
-                    
-                    rootComments.forEach(c => {
-                        addMessageToDOM(c);
-                        const childReplies = replies.filter(r => r.parent_id === c.id);
-                        if (childReplies.length > 0) {
-                            const toggle = document.createElement('div');
-                            toggle.className = 'reply-toggle';
-                            toggle.textContent = `▼ ${childReplies.length} ответов`;
-                            toggle.onclick = () => {
-                                const repliesDiv = document.getElementById(`replies-${c.id}`);
-                                if (repliesDiv.style.display === 'none') {
-                                    repliesDiv.style.display = 'block';
-                                    toggle.textContent = `▲ ${childReplies.length} ответов`;
-                                } else {
-                                    repliesDiv.style.display = 'none';
-                                    toggle.textContent = `▼ ${childReplies.length} ответов`;
-                                }
-                            };
-                            container.appendChild(toggle);
-                            
-                            const repliesDiv = document.createElement('div');
-                            repliesDiv.id = `replies-${c.id}`;
-                            repliesDiv.className = 'replies-container';
-                            repliesDiv.style.display = 'none';
-                            childReplies.forEach(r => addReplyToDOM(repliesDiv, r));
-                            container.appendChild(repliesDiv);
+                    // Проверяем, изменилось ли количество комментариев
+                    if (data.comments.length !== lastCommentCount) {
+                        lastCommentCount = data.comments.length;
+                        renderComments(data.comments, container);
+                        lastUpdateTime = Date.now();
+                        updateRefreshIndicator();
+                    } else {
+                        // Проверяем, не изменился ли последний комментарий
+                        const lastComment = data.comments[data.comments.length - 1];
+                        const lastDiv = container.lastChild;
+                        if (lastDiv && lastDiv.id !== `msg-${lastComment.id}`) {
+                            renderComments(data.comments, container);
+                            lastUpdateTime = Date.now();
+                            updateRefreshIndicator();
                         }
-                    });
+                    }
                 } else {
-                    container.innerHTML = `<div class="empty-state">💬 Нет сообщений<br><span style="font-size:12px">Напишите первое сообщение</span></div>`;
+                    if (container.innerHTML !== `<div class="empty-state">💬 Нет сообщений<br><span style="font-size:12px">Напишите первое сообщение</span></div>`) {
+                        container.innerHTML = `<div class="empty-state">💬 Нет сообщений<br><span style="font-size:12px">Напишите первое сообщение</span></div>`;
+                        lastUpdateTime = Date.now();
+                        updateRefreshIndicator();
+                    }
                 }
-                container.scrollTop = container.scrollHeight;
             } catch (error) {
                 console.error(error);
-                document.getElementById('messagesContainer').innerHTML = '<div class="empty-state">⚠️ Ошибка загрузки</div>';
+            } finally {
+                isLoading = false;
             }
         }
         
-        function addMessageToDOM(comment) {
-            const container = document.getElementById('messagesContainer');
+        function renderComments(comments, container) {
+            const rootComments = comments.filter(c => c.parent_id === 0);
+            const replies = comments.filter(c => c.parent_id !== 0);
+            
+            container.innerHTML = '';
+            
+            rootComments.forEach(c => {
+                addMessageToDOM(container, c);
+                const childReplies = replies.filter(r => r.parent_id === c.id);
+                if (childReplies.length > 0) {
+                    const toggle = document.createElement('div');
+                    toggle.className = 'reply-toggle';
+                    toggle.textContent = `▼ ${childReplies.length} ответов`;
+                    toggle.onclick = () => {
+                        const repliesDiv = document.getElementById(`replies-${c.id}`);
+                        if (repliesDiv.style.display === 'none') {
+                            repliesDiv.style.display = 'block';
+                            toggle.textContent = `▲ ${childReplies.length} ответов`;
+                        } else {
+                            repliesDiv.style.display = 'none';
+                            toggle.textContent = `▼ ${childReplies.length} ответов`;
+                        }
+                    };
+                    container.appendChild(toggle);
+                    
+                    const repliesDiv = document.createElement('div');
+                    repliesDiv.id = `replies-${c.id}`;
+                    repliesDiv.className = 'replies-container';
+                    repliesDiv.style.display = 'none';
+                    childReplies.forEach(r => addReplyToDOM(repliesDiv, r));
+                    container.appendChild(repliesDiv);
+                }
+            });
+            
+            container.scrollTop = container.scrollHeight;
+        }
+        
+        function addMessageToDOM(container, comment) {
             const time = new Date(comment.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
             const avatarColor = getAvatarColor(comment.username);
             const letter = (comment.username.charAt(0) || '?').toUpperCase();
@@ -491,56 +528,6 @@ HTML = """
                 </div>
             `;
             container.appendChild(div);
-        }
-        
-        function addCommentToTop(comment) {
-            const container = document.getElementById('messagesContainer');
-            const time = new Date(comment.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-            const avatarColor = getAvatarColor(comment.username);
-            const letter = (comment.username.charAt(0) || '?').toUpperCase();
-            const isMine = comment.user_id === userId;
-            
-            const div = document.createElement('div');
-            div.className = 'message';
-            div.id = `msg-${comment.id}`;
-            div.innerHTML = `
-                <div class="message-avatar" style="background: ${avatarColor}">${escapeHtml(letter)}</div>
-                <div class="message-content">
-                    <div class="message-header">
-                        <span class="message-name">${escapeHtml(comment.username)}</span>
-                        ${isMine ? '<span class="message-badge">Вы</span>' : ''}
-                        <span class="message-time">${time}</span>
-                    </div>
-                    <div class="message-text" id="text-${comment.id}">${escapeHtml(comment.comment)}</div>
-                    <div class="message-actions">
-                        <button class="like-btn" onclick="likeComment(${comment.id})">❤️ 0</button>
-                        <button class="reply-btn" onclick="setReply(${comment.id}, '${escapeHtml(comment.username)}')">💬 Ответить</button>
-                        ${isMine ? `<button onclick="editComment(${comment.id}, '${escapeHtml(comment.comment).replace(/'/g, "\\'")}')">✏️</button>` : ''}
-                        ${isMine ? `<button onclick="deleteComment(${comment.id})">🗑</button>` : ''}
-                    </div>
-                </div>
-            `;
-            
-            const emptyState = container.querySelector('.empty-state');
-            if (emptyState) {
-                container.innerHTML = '';
-            }
-            container.appendChild(div);
-            container.scrollTop = container.scrollHeight;
-        }
-        
-        function updateCommentInDOM(comment) {
-            const textDiv = document.getElementById(`text-${comment.id}`);
-            if (textDiv) {
-                textDiv.innerHTML = escapeHtml(comment.comment);
-            }
-        }
-        
-        function removeCommentFromDOM(commentId) {
-            const msgDiv = document.getElementById(`msg-${commentId}`);
-            if (msgDiv) {
-                msgDiv.remove();
-            }
         }
         
         function addReplyToDOM(container, reply) {
@@ -605,6 +592,10 @@ HTML = """
             };
             if (replyToId) data.parent_id = replyToId;
             
+            const btn = document.querySelector('.send-btn');
+            btn.disabled = true;
+            btn.style.opacity = '0.5';
+            
             try {
                 const response = await fetch('/api/comment', {
                     method: 'POST',
@@ -617,11 +608,16 @@ HTML = """
                     messageInput.style.height = 'auto';
                     cancelReply();
                     showStatus('✅ Отправлено!', 'success');
+                    // Сразу обновляем комментарии
+                    await loadMessages();
                 } else {
                     showStatus('❌ Ошибка', 'error');
                 }
             } catch (error) {
                 showStatus('❌ Ошибка соединения', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.style.opacity = '1';
             }
         }
         
@@ -649,6 +645,7 @@ HTML = """
                     });
                     if (response.ok) {
                         showStatus('✏️ Сообщение обновлено', 'success');
+                        loadMessages();
                     }
                 } catch(e) { showStatus('❌ Ошибка', 'error'); }
             }
@@ -664,6 +661,7 @@ HTML = """
                 });
                 if (response.ok) {
                     showStatus('🗑 Сообщение удалено', 'success');
+                    loadMessages();
                 }
             } catch(e) { showStatus('❌ Ошибка', 'error'); }
         }
@@ -681,7 +679,14 @@ HTML = """
             return div.innerHTML;
         }
         
+        // Загружаем комментарии при старте
         loadMessages();
+        
+        // Автообновление каждые 5 секунд
+        setInterval(() => {
+            loadMessages();
+            updateRefreshIndicator();
+        }, 5000);
     </script>
 </body>
 </html>
@@ -709,16 +714,7 @@ def add_comment():
     c.execute("INSERT INTO comments (post_id, parent_id, user_id, username, comment, created_at, liked_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
               (data["post_id"], data.get("parent_id", 0), data["user_id"], data["username"], data["comment"], datetime.now().isoformat(), json.dumps([])))
     conn.commit()
-    
-    comment_id = c.lastrowid
-    c.execute("SELECT id, parent_id, user_id, username, comment, likes, liked_by, created_at FROM comments WHERE id = ?", (comment_id,))
-    row = c.fetchone()
     conn.close()
-    
-    new_comment = {"id": row[0], "parent_id": row[1] or 0, "user_id": row[2], "username": row[3], "comment": row[4], "likes": row[5], "liked_by": row[6], "created_at": row[7]}
-    
-    socketio.emit('new_comment', new_comment, room=data["post_id"])
-    
     return jsonify({"ok": True})
 
 @app.route('/api/comment/<int:id>/like', methods=['POST'])
@@ -727,83 +723,43 @@ def like_comment(id):
     user_id = data.get("user_id")
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT liked_by, post_id FROM comments WHERE id = ?", (id,))
+    c.execute("SELECT liked_by FROM comments WHERE id = ?", (id,))
     row = c.fetchone()
     if row:
         liked_by = json.loads(row[0]) if row[0] else []
-        post_id = row[1]
         if user_id in liked_by:
             liked_by.remove(user_id)
         else:
             liked_by.append(user_id)
         c.execute("UPDATE comments SET likes = ?, liked_by = ? WHERE id = ?", (len(liked_by), json.dumps(liked_by), id))
         conn.commit()
-        
-        c.execute("SELECT id, parent_id, user_id, username, comment, likes, liked_by, created_at FROM comments WHERE id = ?", (id,))
-        updated = c.fetchone()
-        conn.close()
-        
-        updated_comment = {"id": updated[0], "parent_id": updated[1] or 0, "user_id": updated[2], "username": updated[3], "comment": updated[4], "likes": updated[5], "liked_by": updated[6], "created_at": updated[7]}
-        
-        socketio.emit('comment_updated', updated_comment, room=post_id)
-        
-        return jsonify({"ok": True})
     conn.close()
-    return jsonify({"ok": False})
+    return jsonify({"ok": True})
 
 @app.route('/api/comment/<int:id>', methods=['PUT'])
 def edit_comment(id):
     data = request.get_json()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT post_id FROM comments WHERE id = ? AND user_id = ?", (id, data["user_id"]))
-    row = c.fetchone()
-    if row:
-        post_id = row[0]
-        c.execute("UPDATE comments SET comment = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-                  (data["comment"], datetime.now().isoformat(), id, data["user_id"]))
-        conn.commit()
-        
-        c.execute("SELECT id, parent_id, user_id, username, comment, likes, liked_by, created_at FROM comments WHERE id = ?", (id,))
-        updated = c.fetchone()
-        conn.close()
-        
-        updated_comment = {"id": updated[0], "parent_id": updated[1] or 0, "user_id": updated[2], "username": updated[3], "comment": updated[4], "likes": updated[5], "liked_by": updated[6], "created_at": updated[7]}
-        
-        socketio.emit('comment_updated', updated_comment, room=post_id)
-        
-        return jsonify({"ok": True})
+    c.execute("UPDATE comments SET comment = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+              (data["comment"], datetime.now().isoformat(), id, data["user_id"]))
+    conn.commit()
     conn.close()
-    return jsonify({"ok": False})
+    return jsonify({"ok": True})
 
 @app.route('/api/comment/<int:id>', methods=['DELETE'])
 def delete_comment(id):
     data = request.get_json()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT post_id FROM comments WHERE id = ? AND user_id = ?", (id, data["user_id"]))
-    row = c.fetchone()
-    if row:
-        post_id = row[0]
-        c.execute("DELETE FROM comments WHERE id = ? AND user_id = ?", (id, data["user_id"]))
-        conn.commit()
-        conn.close()
-        
-        socketio.emit('comment_deleted', id, room=post_id)
-        
-        return jsonify({"ok": True})
+    c.execute("DELETE FROM comments WHERE id = ? AND user_id = ?", (id, data["user_id"]))
+    conn.commit()
     conn.close()
-    return jsonify({"ok": False})
+    return jsonify({"ok": True})
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "ok"})
-
-@socketio.on('join')
-def on_join(data):
-    room = data
-    join_room(room)
-    print(f"Клиент подключился к комнате {room}")
+    return jsonify({"status": "ok", "db_exists": os.path.exists(DB_PATH)})
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000)
