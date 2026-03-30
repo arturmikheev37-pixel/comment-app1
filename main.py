@@ -23,10 +23,13 @@ BACKUP_RETENTION = max(3, int(os.getenv("COMMENTS_BACKUP_RETENTION", "20")))
 STORE_ARCHIVE_PATH = os.getenv("COMMENTS_STORE_ARCHIVE", os.path.join(BASE_DIR, "comment_store.zip"))
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "f9LHodD0cOIdrNPjh3CWiZlW8bj-DhNpjF6VBTWDQP66-wijDIChpbtLyNZeZOtubmx3thZhMxQe7j8oXnCq").strip()
 BOT_USERNAME = os.getenv("MAX_BOT_USERNAME", "id250300578953_1_bot").strip()
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".heic", ".heif", ".avif"}
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv", ".3gp"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v"}
 ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+MAX_IMAGE_BYTES = 15 * 1024 * 1024
+MAX_VIDEO_BYTES = 80 * 1024 * 1024
 BACKUP_LOCK = threading.Lock()
+app.config["MAX_CONTENT_LENGTH"] = MAX_VIDEO_BYTES + (2 * 1024 * 1024)
 
 
 def get_db_connection():
@@ -255,23 +258,81 @@ def allowed_file(filename: str) -> bool:
     return ext in ALLOWED_EXTENSIONS
 
 
-def get_media_kind(filename: str) -> str:
-    _, ext = os.path.splitext(filename.lower())
-    if ext in VIDEO_EXTENSIONS:
-        return "video"
-    return "image"
+def sniff_media_type(file_storage) -> tuple[str | None, str | None]:
+    stream = file_storage.stream
+    position = stream.tell()
+    header = stream.read(64)
+    stream.seek(position)
+
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image", ".jpg"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image", ".png"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return "image", ".gif"
+    if header.startswith(b"BM"):
+        return "image", ".bmp"
+    if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return "image", ".webp"
+    if len(header) >= 12 and header[4:8] == b"ftyp":
+        major_brand = header[8:12]
+        if major_brand == b"qt  ":
+            return "video", ".mov"
+        if major_brand in {b"M4V ", b"M4VH", b"M4VP"}:
+            return "video", ".m4v"
+        return "video", ".mp4"
+    if header.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video", ".webm"
+    return None, None
+
+
+def get_stream_size(file_storage) -> int:
+    stream = file_storage.stream
+    position = stream.tell()
+    stream.seek(0, os.SEEK_END)
+    size = stream.tell()
+    stream.seek(position)
+    return size
+
+
+def validate_media_file(file_storage) -> tuple[str, str]:
+    if not file_storage or not file_storage.filename:
+        raise ValueError("Файл не выбран")
+
+    detected_type, detected_ext = sniff_media_type(file_storage)
+    if not detected_type or not detected_ext:
+        raise ValueError("Разрешены только безопасные фото и видео форматов JPG, PNG, GIF, WEBP, BMP, MP4, MOV, WEBM, M4V")
+
+    size = get_stream_size(file_storage)
+    if detected_type == "image" and size > MAX_IMAGE_BYTES:
+        raise ValueError("Фото слишком большое. Максимум 15 МБ")
+    if detected_type == "video" and size > MAX_VIDEO_BYTES:
+        raise ValueError("Видео слишком большое. Максимум 80 МБ")
+
+    mime_type = (file_storage.mimetype or "").lower().strip()
+    if detected_type == "image" and mime_type and not mime_type.startswith("image/"):
+        raise ValueError("Файл не похож на изображение")
+    if detected_type == "video" and mime_type and not mime_type.startswith("video/"):
+        raise ValueError("Файл не похож на видео")
+
+    original_name = secure_filename(file_storage.filename) or "upload"
+    original_ext = os.path.splitext(original_name.lower())[1]
+    if original_ext and original_ext in ALLOWED_EXTENSIONS:
+        if detected_type == "image" and original_ext not in IMAGE_EXTENSIONS:
+            raise ValueError("Разрешены только изображения")
+        if detected_type == "video" and original_ext not in VIDEO_EXTENSIONS:
+            raise ValueError("Разрешены только видео")
+
+    return detected_type, detected_ext
 
 
 def save_uploaded_media(file_storage):
     if not file_storage or not file_storage.filename:
         return None, None
-    filename = secure_filename(file_storage.filename)
-    if not filename or not allowed_file(filename):
-        raise ValueError("Можно загружать изображения и видео: JPG, PNG, GIF, WEBP, BMP, SVG, HEIC, AVIF, MP4, MOV, WEBM, M4V, AVI, MKV, 3GP")
-    _, ext = os.path.splitext(filename)
+    media_type, ext = validate_media_file(file_storage)
     stored_name = f"{uuid.uuid4().hex}{ext.lower()}"
     file_storage.save(os.path.join(UPLOAD_DIR, stored_name))
-    return stored_name, get_media_kind(filename)
+    return stored_name, media_type
 
 
 def parse_request_payload():
@@ -857,7 +918,7 @@ HTML_TEMPLATE = """
             <textarea id="comment" maxlength="1000" placeholder="Написать комментарий..."></textarea>
             <div class="attachment-row">
                 <button class="attach-btn" id="attachBtn" type="button">Фото/видео</button>
-                <input id="imageInput" type="file" accept="image/*,video/*" hidden>
+                <input id="imageInput" type="file" accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.mp4,.mov,.webm,.m4v,image/jpeg,image/png,image/gif,image/webp,image/bmp,video/mp4,video/quicktime,video/webm,video/x-m4v" hidden>
             </div>
             <div class="preview" id="imagePreview">
                 <img id="previewImage" alt="preview" hidden>
@@ -906,6 +967,9 @@ HTML_TEMPLATE = """
         let latestComments = [];
         let menuCommentId = null;
         let longPressTimer = null;
+        const allowedImageTypes = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"]);
+        const allowedVideoTypes = new Set(["video/mp4", "video/quicktime", "video/webm", "video/x-m4v"]);
+        const allowedExtensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".webm", ".m4v"];
 
         function resolveWebAppObject() {
             if (window.WebApp) return window.WebApp;
@@ -922,6 +986,58 @@ HTML_TEMPLATE = """
         function showStatus(message, type) {
             status.textContent = message;
             status.className = "status " + type;
+        }
+
+        function hasAllowedExtension(file) {
+            const name = (file && file.name ? file.name.toLowerCase() : "");
+            return allowedExtensions.some((ext) => name.endsWith(ext));
+        }
+
+        function isAllowedMediaFile(file) {
+            const fileType = (file && file.type ? file.type.toLowerCase() : "");
+            return allowedImageTypes.has(fileType) || allowedVideoTypes.has(fileType) || hasAllowedExtension(file);
+        }
+
+        function loadImageElement(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onerror = () => reject(new Error("Не удалось прочитать изображение"));
+                reader.onload = () => {
+                    const image = new Image();
+                    image.onload = () => resolve(image);
+                    image.onerror = () => reject(new Error("Не удалось обработать изображение"));
+                    image.src = reader.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function compressImageFile(file) {
+            const fileType = (file.type || "").toLowerCase();
+            if (!fileType.startsWith("image/") || fileType === "image/gif" || file.size < 1_500_000) {
+                return file;
+            }
+
+            const image = await loadImageElement(file);
+            const maxWidth = 1920;
+            const maxHeight = 1920;
+            const scale = Math.min(1, maxWidth / image.width, maxHeight / image.height);
+            const width = Math.max(1, Math.round(image.width * scale));
+            const height = Math.max(1, Math.round(image.height * scale));
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext("2d", { alpha: false });
+            context.drawImage(image, 0, 0, width, height);
+
+            const blob = await new Promise((resolve) => {
+                canvas.toBlob(resolve, "image/jpeg", 0.82);
+            });
+            if (!blob || blob.size >= file.size) {
+                return file;
+            }
+            const safeName = (file.name || "photo").replace(/\\.[^.]+$/, "") + ".jpg";
+            return new File([blob], safeName, { type: "image/jpeg", lastModified: Date.now() });
         }
 
         function syncComposerSpace() {
@@ -1299,9 +1415,31 @@ HTML_TEMPLATE = """
             });
             submitBtn.addEventListener("click", sendComment);
             attachBtn.addEventListener("click", () => imageInput.click());
-            imageInput.addEventListener("change", () => {
-                selectedImage = imageInput.files && imageInput.files[0] ? imageInput.files[0] : null;
-                setPreviewFromFile(selectedImage);
+            imageInput.addEventListener("change", async () => {
+                const pickedFile = imageInput.files && imageInput.files[0] ? imageInput.files[0] : null;
+                if (!pickedFile) {
+                    selectedImage = null;
+                    setPreviewFromFile(null);
+                    return;
+                }
+                if (!isAllowedMediaFile(pickedFile)) {
+                    selectedImage = null;
+                    imageInput.value = "";
+                    setPreviewFromFile(null);
+                    showStatus("Разрешены только фото JPG, PNG, GIF, WEBP, BMP и видео MP4, MOV, WEBM, M4V", "error");
+                    return;
+                }
+                try {
+                    showStatus("Готовим вложение...", "");
+                    selectedImage = await compressImageFile(pickedFile);
+                    setPreviewFromFile(selectedImage);
+                    showStatus("", "");
+                } catch (error) {
+                    selectedImage = null;
+                    imageInput.value = "";
+                    setPreviewFromFile(null);
+                    showStatus(error.message || "Не удалось подготовить файл", "error");
+                }
             });
             removeImageBtn.addEventListener("click", () => {
                 selectedImage = null;
@@ -1538,6 +1676,11 @@ def health():
             "recent_backups": backups,
         }
     )
+
+
+@app.errorhandler(413)
+def request_too_large(_error):
+    return jsonify({"error": "Файл слишком большой для загрузки"}), 413
 
 
 restore_store_archive_if_needed()
