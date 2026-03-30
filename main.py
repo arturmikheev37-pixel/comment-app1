@@ -38,8 +38,30 @@ def init_db():
             username TEXT NOT NULL,
             comment TEXT NOT NULL,
             image_path TEXT,
+            parent_id INTEGER,
             edited_at TEXT,
             created_at TEXT NOT NULL
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS posts (
+            post_id TEXT PRIMARY KEY,
+            source_post_id TEXT,
+            post_text TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS comment_reactions (
+            comment_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
+            reaction TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (comment_id, user_id, reaction)
         )
         """
     )
@@ -49,8 +71,18 @@ def init_db():
         cursor.execute("ALTER TABLE comments ADD COLUMN post_id TEXT")
     if "image_path" not in columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN image_path TEXT")
+    if "parent_id" not in columns:
+        cursor.execute("ALTER TABLE comments ADD COLUMN parent_id INTEGER")
     if "edited_at" not in columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN edited_at TEXT")
+
+    post_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(posts)").fetchall()}
+    if "source_post_id" not in post_columns:
+        cursor.execute("ALTER TABLE posts ADD COLUMN source_post_id TEXT")
+    if "post_text" not in post_columns:
+        cursor.execute("ALTER TABLE posts ADD COLUMN post_text TEXT NOT NULL DEFAULT ''")
+    if "created_at" not in post_columns:
+        cursor.execute("ALTER TABLE posts ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
 
     cursor.execute(
         """
@@ -91,9 +123,52 @@ def serialize_comment(row: sqlite3.Row) -> dict:
         "username": row["username"],
         "comment": row["comment"],
         "image_url": build_file_url(row["image_path"]),
+        "parent_id": row["parent_id"],
         "edited_at": row["edited_at"],
         "created_at": row["created_at"],
     }
+
+
+def serialize_post(row: sqlite3.Row | None) -> dict | None:
+    if not row:
+        return None
+    return {
+        "post_id": row["post_id"],
+        "source_post_id": row["source_post_id"],
+        "post_text": row["post_text"],
+        "created_at": row["created_at"],
+    }
+
+
+def get_post_info(post_id: str) -> dict | None:
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT post_id, source_post_id, post_text, created_at FROM posts WHERE post_id = ?",
+        (post_id,),
+    ).fetchone()
+    conn.close()
+    return serialize_post(row)
+
+
+def get_reactions_map(post_id: str) -> dict[int, dict]:
+    conn = get_db_connection()
+    rows = conn.execute(
+        """
+        SELECT r.comment_id, r.reaction, r.user_id
+        FROM comment_reactions r
+        JOIN comments c ON c.id = r.comment_id
+        WHERE c.post_id = ?
+        """,
+        (post_id,),
+    ).fetchall()
+    conn.close()
+
+    result: dict[int, dict] = {}
+    for row in rows:
+        comment_bucket = result.setdefault(row["comment_id"], {"counts": {}, "users": {}})
+        comment_bucket["counts"][row["reaction"]] = comment_bucket["counts"].get(row["reaction"], 0) + 1
+        comment_bucket["users"].setdefault(row["reaction"], []).append(row["user_id"])
+    return result
 
 
 def allowed_file(filename: str) -> bool:
@@ -247,9 +322,38 @@ HTML_TEMPLATE = """
             word-break: break-all;
         }
 
+        .post-card {
+            margin: 12px;
+            padding: 12px 14px;
+            border-radius: 18px;
+            background: rgba(23, 33, 43, 0.94);
+            border: 1px solid var(--tg-panel-border);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+        }
+
+        .post-card-label {
+            font-size: 11px;
+            color: var(--tg-muted);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .post-card-text {
+            font-size: 14px;
+            line-height: 1.45;
+            color: var(--tg-text);
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
         .feed {
             flex: 1;
-            padding: 16px 12px 110px;
+            padding: 4px 12px 110px;
             display: flex;
             flex-direction: column;
             gap: 10px;
@@ -259,6 +363,16 @@ HTML_TEMPLATE = """
             display: flex;
             gap: 8px;
             align-items: flex-end;
+        }
+
+        .message-thread {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .message-thread.reply {
+            margin-left: 44px;
         }
 
         .message-row.mine {
@@ -332,6 +446,38 @@ HTML_TEMPLATE = """
             color: #d7e9ff;
         }
 
+        .reply-pill {
+            margin-bottom: 6px;
+            padding: 6px 8px;
+            border-left: 2px solid #59aef9;
+            background: rgba(255, 255, 255, 0.04);
+            border-radius: 10px;
+            font-size: 12px;
+            color: #c9def2;
+        }
+
+        .reactions {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-top: 8px;
+        }
+
+        .reaction-btn {
+            border: none;
+            background: rgba(255, 255, 255, 0.06);
+            color: #d7e9ff;
+            border-radius: 999px;
+            padding: 4px 8px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .reaction-btn.active {
+            background: rgba(46, 166, 255, 0.22);
+            color: #ffffff;
+        }
+
         .empty {
             align-self: center;
             margin-top: 28px;
@@ -368,6 +514,20 @@ HTML_TEMPLATE = """
             padding: 10px 12px;
             margin-bottom: 8px;
             font-size: 14px;
+        }
+
+        .reply-box {
+            display: none;
+            margin-bottom: 8px;
+            padding: 10px 12px;
+            border-radius: 14px;
+            background: #223140;
+            font-size: 12px;
+            color: #cfe5fb;
+        }
+
+        .reply-box.show {
+            display: block;
         }
 
         .attachment-row {
@@ -496,6 +656,10 @@ HTML_TEMPLATE = """
             </div>
             <div class="subtitle" id="postLabel">Загрузка контекста поста...</div>
         </header>
+        <section class="post-card" id="postCard" hidden>
+            <div class="post-card-label">Пост</div>
+            <div class="post-card-text" id="postCardText"></div>
+        </section>
 
         <main class="feed" id="commentsList"></main>
     </div>
@@ -503,6 +667,7 @@ HTML_TEMPLATE = """
     <div class="composer">
         <div class="composer-card">
             <div class="identity" id="identity">Автор: определяем профиль MAX...</div>
+            <div class="reply-box" id="replyBox"></div>
             <textarea id="comment" maxlength="1000" placeholder="Написать комментарий..."></textarea>
             <div class="attachment-row">
                 <button class="attach-btn" id="attachBtn" type="button">Фото</button>
@@ -538,6 +703,9 @@ HTML_TEMPLATE = """
         const imagePreview = document.getElementById("imagePreview");
         const previewImage = document.getElementById("previewImage");
         const removeImageBtn = document.getElementById("removeImageBtn");
+        const postCard = document.getElementById("postCard");
+        const postCardText = document.getElementById("postCardText");
+        const replyBox = document.getElementById("replyBox");
 
         let initData = "";
         let postId = "";
@@ -545,6 +713,9 @@ HTML_TEMPLATE = """
         let selectedImage = null;
         let editingCommentId = null;
         let latestComments = [];
+        let replyToCommentId = null;
+        let postInfo = null;
+        const reactionOptions = ["👍", "❤️", "🔥", "😂"];
 
         function resolveWebAppObject() {
             if (window.WebApp) return window.WebApp;
@@ -638,6 +809,7 @@ HTML_TEMPLATE = """
 
         function resetComposer() {
             editingCommentId = null;
+            replyToCommentId = null;
             selectedImage = null;
             commentInput.value = "";
             charCount.textContent = "0";
@@ -645,28 +817,39 @@ HTML_TEMPLATE = """
             imagePreview.classList.remove("show");
             previewImage.removeAttribute("src");
             submitBtn.textContent = "Отправить";
+            replyBox.classList.remove("show");
+            replyBox.textContent = "";
         }
 
-        function renderComments(comments) {
-            latestComments = comments || [];
-            if (!latestComments.length) {
-                commentsList.innerHTML = '<div class="empty">Пока нет комментариев. Можно написать первый.</div>';
-                return;
-            }
+        function renderReactionButtons(comment) {
+            const reactions = comment.reactions || {};
+            const myReactions = comment.my_reactions || [];
+            return reactionOptions.map((emoji) => {
+                const count = reactions[emoji] || 0;
+                const active = myReactions.includes(emoji) ? "active" : "";
+                return `<button class="reaction-btn ${active}" type="button" onclick="toggleReaction(${comment.id}, ${JSON.stringify(emoji)})">${emoji} ${count || ""}</button>`;
+            }).join("");
+        }
 
-            commentsList.innerHTML = latestComments.reverse().map((comment) => {
-                const mine = currentUser && comment.user_id === currentUser.user_id;
-                const initial = escapeHtml((comment.username || "?").charAt(0).toUpperCase());
-                const imageHtml = comment.image_url ? `<img class="message-image" src="${comment.image_url}" alt="comment image">` : "";
-                const editedHtml = comment.edited_at ? '<span>изменено</span>' : "";
-                return `
+        function renderCommentNode(comment, replyMap) {
+            const mine = currentUser && comment.user_id === currentUser.user_id;
+            const initial = escapeHtml((comment.username || "?").charAt(0).toUpperCase());
+            const imageHtml = comment.image_url ? `<img class="message-image" src="${comment.image_url}" alt="comment image">` : "";
+            const editedHtml = comment.edited_at ? '<span>изменено</span>' : "";
+            const parentPreview = comment.parent_preview ? `<div class="reply-pill">Ответ для ${escapeHtml(comment.parent_preview.username)}: ${escapeHtml(comment.parent_preview.comment)}</div>` : "";
+            const replies = (replyMap[comment.id] || []).map((child) => `<div class="message-thread reply">${renderCommentNode(child, replyMap)}</div>`).join("");
+            return `
+                <div class="message-thread">
                     <div class="message-row ${mine ? "mine" : ""}">
                         ${mine ? "" : `<div class="avatar">${initial}</div>`}
                         <div class="bubble">
                             <div class="message-name">${escapeHtml(comment.username)}</div>
+                            ${parentPreview}
                             <div class="message-text">${escapeHtml(comment.comment)}</div>
                             ${imageHtml}
+                            <div class="reactions">${renderReactionButtons(comment)}</div>
                             <div class="message-meta">
+                                <span class="message-action" onclick="startReply(${comment.id})">Ответить</span>
                                 <span class="message-action" onclick="shareComment(${comment.id})">Поделиться</span>
                                 ${mine ? `<span class="message-action" onclick="startEdit(${comment.id})">Ред.</span>` : ""}
                                 ${mine ? `<span class="message-delete" onclick="deleteComment(${comment.id})">Удалить</span>` : ""}
@@ -676,8 +859,30 @@ HTML_TEMPLATE = """
                         </div>
                         ${mine ? `<div class="avatar">${initial}</div>` : ""}
                     </div>
-                `;
-            }).join("");
+                    ${replies}
+                </div>
+            `;
+        }
+
+        function renderComments(comments) {
+            latestComments = comments || [];
+            if (!latestComments.length) {
+                commentsList.innerHTML = '<div class="empty">Пока нет комментариев. Можно написать первый.</div>';
+                return;
+            }
+            const sorted = [...latestComments].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+            const replyMap = {};
+            const roots = [];
+            sorted.forEach((comment) => {
+                if (comment.parent_id) {
+                    if (!replyMap[comment.parent_id]) replyMap[comment.parent_id] = [];
+                    replyMap[comment.parent_id].push(comment);
+                } else {
+                    roots.push(comment);
+                }
+            });
+
+            commentsList.innerHTML = roots.map((comment) => renderCommentNode(comment, replyMap)).join("");
         }
 
         async function loadComments() {
@@ -687,9 +892,18 @@ HTML_TEMPLATE = """
             }
 
             try {
-                const response = await fetch("/api/comments/" + encodeURIComponent(postId));
+                const url = new URL("/api/comments/" + encodeURIComponent(postId), window.location.origin);
+                if (initData) {
+                    url.searchParams.set("init_data", initData);
+                }
+                const response = await fetch(url);
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Ошибка загрузки");
+                postInfo = data.post || null;
+                if (postInfo && postInfo.post_text) {
+                    postCard.hidden = false;
+                    postCardText.textContent = postInfo.post_text;
+                }
                 renderComments(data.comments || []);
             } catch (error) {
                 commentsList.innerHTML = '<div class="empty">Не удалось загрузить комментарии.</div>';
@@ -729,14 +943,16 @@ HTML_TEMPLATE = """
                     formData.append("post_id", postId);
                     formData.append("comment", comment);
                     formData.append("init_data", initData);
+                    if (replyToCommentId) formData.append("parent_id", String(replyToCommentId));
                     if (selectedImage) formData.append("image", selectedImage);
                     response = await fetch("/api/comment", { method: "POST", body: formData });
                 }
 
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Ошибка отправки");
+                const wasEditing = Boolean(editingCommentId);
                 resetComposer();
-                showStatus(editingCommentId ? "Комментарий обновлён" : "Комментарий отправлен", "success");
+                showStatus(wasEditing ? "Комментарий обновлён" : "Комментарий отправлен", "success");
                 await loadComments();
             } catch (error) {
                 showStatus(error.message || "Не удалось отправить комментарий", "error");
@@ -766,11 +982,40 @@ HTML_TEMPLATE = """
             const comment = latestComments.find((item) => item.id === commentId);
             if (!comment) return;
             editingCommentId = commentId;
+            replyToCommentId = null;
             commentInput.value = comment.comment || "";
             charCount.textContent = commentInput.value.length;
             submitBtn.textContent = "Сохранить";
             commentInput.focus();
+            replyBox.classList.remove("show");
             showStatus("Редактирование комментария", "");
+        }
+
+        function startReply(commentId) {
+            const comment = latestComments.find((item) => item.id === commentId);
+            if (!comment) return;
+            editingCommentId = null;
+            replyToCommentId = commentId;
+            submitBtn.textContent = "Отправить";
+            replyBox.classList.add("show");
+            replyBox.textContent = `Ответ для ${comment.username}: ${comment.comment || "фото"}`;
+            commentInput.focus();
+        }
+
+        async function toggleReaction(commentId, reaction) {
+            if (!initData) return;
+            try {
+                const response = await fetch("/api/comment/" + commentId + "/reaction", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ init_data: initData, reaction: reaction })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || "Ошибка реакции");
+                await loadComments();
+            } catch (error) {
+                showStatus(error.message || "Не удалось поставить реакцию", "error");
+            }
         }
 
         async function shareComment(commentId) {
@@ -836,6 +1081,8 @@ HTML_TEMPLATE = """
         window.deleteComment = deleteComment;
         window.shareComment = shareComment;
         window.startEdit = startEdit;
+        window.startReply = startReply;
+        window.toggleReaction = toggleReaction;
         boot();
     </script>
 </body>
@@ -866,7 +1113,7 @@ def get_comments_by_post(post_id):
     conn = get_db_connection()
     rows = conn.execute(
         """
-        SELECT id, post_id, user_id, username, comment, image_path, edited_at, created_at
+        SELECT id, post_id, user_id, username, comment, image_path, parent_id, edited_at, created_at
         FROM comments
         WHERE post_id = ?
         ORDER BY created_at DESC
@@ -874,7 +1121,28 @@ def get_comments_by_post(post_id):
         (normalized_post_id,),
     ).fetchall()
     conn.close()
-    return jsonify({"post_id": normalized_post_id, "comments": [serialize_comment(row) for row in rows]})
+    comments = [serialize_comment(row) for row in rows]
+    reactions_map = get_reactions_map(normalized_post_id)
+    comment_lookup = {comment["id"]: comment for comment in comments}
+    current_user = validate_max_init_data(request.args.get("init_data", ""))
+    current_user_id = (current_user or {}).get("user_id")
+
+    for comment in comments:
+        reaction_meta = reactions_map.get(comment["id"], {"counts": {}, "users": {}})
+        comment["reactions"] = reaction_meta["counts"]
+        comment["my_reactions"] = [
+            emoji for emoji, users in reaction_meta["users"].items()
+            if current_user_id and current_user_id in users
+        ]
+        if comment["parent_id"] and comment["parent_id"] in comment_lookup:
+            parent = comment_lookup[comment["parent_id"]]
+            comment["parent_preview"] = {
+                "username": parent["username"],
+                "comment": (parent["comment"] or "Фото")[:80],
+            }
+        else:
+            comment["parent_preview"] = None
+    return jsonify({"post_id": normalized_post_id, "post": get_post_info(normalized_post_id), "comments": comments})
 
 
 @app.route("/api/post_count/<path:post_id>")
@@ -894,6 +1162,7 @@ def add_comment():
     payload, files = parse_request_payload()
     post_id = normalize_post_id(payload.get("post_id"))
     comment = normalize_comment(payload.get("comment"))
+    parent_id = payload.get("parent_id")
     verified_user = validate_max_init_data(payload.get("init_data", ""))
 
     if not post_id:
@@ -906,16 +1175,17 @@ def add_comment():
         return jsonify({"error": str(error)}), 400
     if not comment and not image_path:
         return jsonify({"error": "Комментарий пустой"}), 400
+    normalized_parent_id = int(parent_id) if str(parent_id or "").isdigit() else None
 
     created_at = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO comments (post_id, user_id, username, comment, image_path, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO comments (post_id, user_id, username, comment, image_path, parent_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (post_id, verified_user["user_id"], verified_user["username"], comment, image_path, created_at),
+        (post_id, verified_user["user_id"], verified_user["username"], comment, image_path, normalized_parent_id, created_at),
     )
     conn.commit()
     comment_id = cursor.lastrowid
@@ -931,6 +1201,7 @@ def add_comment():
                 "username": verified_user["username"],
                 "comment": comment,
                 "image_url": build_file_url(image_path),
+                "parent_id": normalized_parent_id,
                 "edited_at": None,
                 "created_at": created_at,
             },
@@ -994,6 +1265,73 @@ def delete_comment(comment_id):
         image_file = os.path.join(UPLOAD_DIR, image_path)
         if os.path.exists(image_file):
             os.remove(image_file)
+    return jsonify({"status": "success"})
+
+
+@app.route("/api/comment/<int:comment_id>/reaction", methods=["POST"])
+def toggle_comment_reaction(comment_id):
+    payload = request.get_json(silent=True) or {}
+    verified_user = validate_max_init_data(payload.get("init_data", ""))
+    reaction = (payload.get("reaction") or "").strip()[:8]
+
+    if not verified_user:
+        return jsonify({"error": "Не удалось подтвердить пользователя MAX"}), 400
+    if not reaction:
+        return jsonify({"error": "Недопустимая реакция"}), 400
+
+    conn = get_db_connection()
+    comment = conn.execute("SELECT id FROM comments WHERE id = ?", (comment_id,)).fetchone()
+    if not comment:
+        conn.close()
+        return jsonify({"error": "Комментарий не найден"}), 404
+
+    exists = conn.execute(
+        "SELECT 1 FROM comment_reactions WHERE comment_id = ? AND user_id = ? AND reaction = ?",
+        (comment_id, verified_user["user_id"], reaction),
+    ).fetchone()
+    if exists:
+        conn.execute(
+            "DELETE FROM comment_reactions WHERE comment_id = ? AND user_id = ? AND reaction = ?",
+            (comment_id, verified_user["user_id"], reaction),
+        )
+        active = False
+    else:
+        conn.execute(
+            """
+            INSERT INTO comment_reactions (comment_id, user_id, reaction, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (comment_id, verified_user["user_id"], reaction, datetime.now(timezone.utc).isoformat()),
+        )
+        active = True
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success", "active": active})
+
+
+@app.route("/api/post", methods=["POST"])
+def register_post():
+    payload = request.get_json(silent=True) or {}
+    post_id = normalize_post_id(payload.get("post_id"))
+    source_post_id = str(payload.get("source_post_id") or "").strip()[:256]
+    post_text = (payload.get("post_text") or "").strip()[:4000]
+
+    if not post_id or not post_text:
+        return jsonify({"error": "Не переданы данные поста"}), 400
+
+    conn = get_db_connection()
+    conn.execute(
+        """
+        INSERT INTO posts (post_id, source_post_id, post_text, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(post_id) DO UPDATE SET
+            source_post_id = excluded.source_post_id,
+            post_text = excluded.post_text
+        """,
+        (post_id, source_post_id, post_text, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
     return jsonify({"status": "success"})
 
 
