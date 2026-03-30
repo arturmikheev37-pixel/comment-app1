@@ -17,6 +17,7 @@ app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(BASE_DIR, "comments.db")
+STORE_DB_PATH = os.getenv("COMMENTS_STORE_DB", os.path.join(BASE_DIR, "comment_store.db"))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 BACKUP_DIR = os.getenv("COMMENTS_BACKUP_DIR", os.path.join(BASE_DIR, "backups"))
 BACKUP_RETENTION = max(3, int(os.getenv("COMMENTS_BACKUP_RETENTION", "20")))
@@ -115,6 +116,58 @@ def init_db():
     )
     conn.commit()
     conn.close()
+
+
+def count_comments_in_db(db_path: str) -> int:
+    if not os.path.exists(db_path):
+        return 0
+    try:
+        conn = sqlite3.connect(db_path)
+        row = conn.execute("SELECT COUNT(*) FROM comments").fetchone()
+        conn.close()
+        return int(row[0] if row else 0)
+    except sqlite3.Error:
+        return 0
+
+
+def sync_store_db(reason: str = "sync") -> str | None:
+    if not os.path.exists(DB_PATH):
+        return None
+
+    with BACKUP_LOCK:
+        try:
+            source = sqlite3.connect(DB_PATH)
+            target = sqlite3.connect(STORE_DB_PATH)
+            source.backup(target)
+            target.close()
+            source.close()
+            return STORE_DB_PATH
+        except sqlite3.Error as error:
+            print(f"Не удалось обновить store db ({reason}): {error}")
+            return None
+
+
+def restore_store_db_if_needed():
+    primary_count = count_comments_in_db(DB_PATH)
+    mirror_count = count_comments_in_db(STORE_DB_PATH)
+    should_restore = (
+        (not os.path.exists(DB_PATH) and os.path.exists(STORE_DB_PATH))
+        or (mirror_count > 0 and primary_count == 0)
+    )
+    if not should_restore:
+        return False
+
+    with BACKUP_LOCK:
+        try:
+            source = sqlite3.connect(STORE_DB_PATH)
+            target = sqlite3.connect(DB_PATH)
+            source.backup(target)
+            target.close()
+            source.close()
+            return True
+        except sqlite3.Error as error:
+            print(f"Не удалось восстановить DB из {STORE_DB_PATH}: {error}")
+            return False
 
 
 def restore_store_archive_if_needed():
@@ -676,7 +729,7 @@ HTML_TEMPLATE = """
         .message-video {
             display: block;
             margin-top: 8px;
-            max-width: min(100%, 240px);
+            max-width: min(100%, 180px);
             border-radius: 14px;
         }
 
@@ -685,7 +738,7 @@ HTML_TEMPLATE = """
         }
 
         .message-video {
-            width: min(100%, 260px);
+            width: min(100%, 200px);
             background: #000;
         }
 
@@ -862,7 +915,8 @@ HTML_TEMPLATE = """
 
         .preview img,
         .preview video {
-            max-width: 160px;
+            max-width: 128px;
+            max-height: 120px;
             border-radius: 12px;
             display: block;
         }
@@ -1053,6 +1107,7 @@ HTML_TEMPLATE = """
         let latestComments = [];
         let menuCommentId = null;
         let longPressTimer = null;
+        let currentPreviewObjectUrl = null;
         const allowedImageTypes = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"]);
         const allowedVideoTypes = new Set(["video/mp4", "video/quicktime", "video/webm", "video/x-m4v"]);
         const allowedExtensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".webm", ".m4v"];
@@ -1072,6 +1127,13 @@ HTML_TEMPLATE = """
         function showStatus(message, type) {
             status.textContent = message;
             status.className = "status " + type;
+        }
+
+        function revokePreviewObjectUrl() {
+            if (currentPreviewObjectUrl) {
+                URL.revokeObjectURL(currentPreviewObjectUrl);
+                currentPreviewObjectUrl = null;
+            }
         }
 
         function hasAllowedExtension(file) {
@@ -1246,6 +1308,7 @@ HTML_TEMPLATE = """
         }
 
         function setPreviewFromFile(file) {
+            revokePreviewObjectUrl();
             if (!file) {
                 imagePreview.classList.remove("show");
                 previewImage.removeAttribute("src");
@@ -1255,20 +1318,22 @@ HTML_TEMPLATE = """
                 previewVideo.load();
                 return;
             }
-            const reader = new FileReader();
-            reader.onload = () => {
-                const isVideo = (file.type || "").startsWith("video/");
-                previewImage.hidden = isVideo;
-                previewVideo.hidden = !isVideo;
-                if (isVideo) {
-                    previewVideo.src = reader.result;
-                    previewVideo.load();
-                } else {
+            const isVideo = (file.type || "").startsWith("video/");
+            previewImage.hidden = isVideo;
+            previewVideo.hidden = !isVideo;
+            if (isVideo) {
+                currentPreviewObjectUrl = URL.createObjectURL(file);
+                previewVideo.src = currentPreviewObjectUrl;
+                previewVideo.preload = "none";
+                previewVideo.load();
+            } else {
+                const reader = new FileReader();
+                reader.onload = () => {
                     previewImage.src = reader.result;
-                }
-                imagePreview.classList.add("show");
-            };
-            reader.readAsDataURL(file);
+                };
+                reader.readAsDataURL(file);
+            }
+            imagePreview.classList.add("show");
         }
 
         function resetComposer() {
@@ -1279,6 +1344,7 @@ HTML_TEMPLATE = """
             charCount.textContent = "0";
             imageInput.value = "";
             imagePreview.classList.remove("show");
+            revokePreviewObjectUrl();
             previewImage.removeAttribute("src");
             previewImage.hidden = true;
             previewVideo.removeAttribute("src");
@@ -1297,7 +1363,7 @@ HTML_TEMPLATE = """
             const normalizedMediaType = normalizeMediaType(comment.media_type, mediaUrl);
             const mediaHtml = comment.image_url
                 ? (normalizedMediaType === "video"
-                    ? `<video class="message-video" src="${mediaUrl}" controls playsinline preload="metadata"></video><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'video'); return false;">Открыть видео</a>`
+                    ? `<video class="message-video" src="${mediaUrl}" controls playsinline preload="none"></video><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'video'); return false;">Открыть видео</a>`
                     : `<img class="message-image" src="${mediaUrl}" alt="comment media" loading="lazy" onclick="openMediaViewer('${mediaUrl}', 'image')"><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'image'); return false;">Открыть фото</a>`)
                 : "";
             const editedHtml = comment.edited_at ? '<span>изменено</span>' : "";
@@ -1570,7 +1636,11 @@ HTML_TEMPLATE = """
                     showStatus("Готовим вложение...", "");
                     selectedImage = await compressImageFile(pickedFile);
                     setPreviewFromFile(selectedImage);
-                    showStatus("", "");
+                    if ((selectedImage.type || "").startsWith("video/")) {
+                        showStatus("Видео прикреплено", "success");
+                    } else {
+                        showStatus("Фото готово", "success");
+                    }
                 } catch (error) {
                     selectedImage = null;
                     imageInput.value = "";
