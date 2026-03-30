@@ -4,15 +4,19 @@ import hmac
 import json
 import os
 import sqlite3
+import uuid
 from urllib.parse import parse_qsl
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, send_from_directory
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(BASE_DIR, "comments.db")
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "f9LHodD0cOIdrNPjh3CWiZlW8bj-DhNpjF6VBTWDQP66-wijDIChpbtLyNZeZOtubmx3thZhMxQe7j8oXnCq").strip()
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 
 def get_db_connection():
@@ -22,6 +26,7 @@ def get_db_connection():
 
 
 def init_db():
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -32,6 +37,8 @@ def init_db():
             user_id TEXT NOT NULL,
             username TEXT NOT NULL,
             comment TEXT NOT NULL,
+            image_path TEXT,
+            edited_at TEXT,
             created_at TEXT NOT NULL
         )
         """
@@ -40,6 +47,10 @@ def init_db():
     columns = {row["name"] for row in cursor.execute("PRAGMA table_info(comments)").fetchall()}
     if "post_id" not in columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN post_id TEXT")
+    if "image_path" not in columns:
+        cursor.execute("ALTER TABLE comments ADD COLUMN image_path TEXT")
+    if "edited_at" not in columns:
+        cursor.execute("ALTER TABLE comments ADD COLUMN edited_at TEXT")
 
     cursor.execute(
         """
@@ -66,6 +77,12 @@ def normalize_comment(raw_comment: str | None) -> str:
     return (raw_comment or "").strip()[:1000]
 
 
+def build_file_url(image_path: str | None) -> str | None:
+    if not image_path:
+        return None
+    return f"/uploads/{image_path}"
+
+
 def serialize_comment(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
@@ -73,8 +90,33 @@ def serialize_comment(row: sqlite3.Row) -> dict:
         "user_id": row["user_id"],
         "username": row["username"],
         "comment": row["comment"],
+        "image_url": build_file_url(row["image_path"]),
+        "edited_at": row["edited_at"],
         "created_at": row["created_at"],
     }
+
+
+def allowed_file(filename: str) -> bool:
+    _, ext = os.path.splitext(filename.lower())
+    return ext in ALLOWED_EXTENSIONS
+
+
+def save_uploaded_image(file_storage):
+    if not file_storage or not file_storage.filename:
+        return None
+    filename = secure_filename(file_storage.filename)
+    if not filename or not allowed_file(filename):
+        raise ValueError("Можно загружать только JPG, PNG, GIF или WEBP")
+    _, ext = os.path.splitext(filename)
+    stored_name = f"{uuid.uuid4().hex}{ext.lower()}"
+    file_storage.save(os.path.join(UPLOAD_DIR, stored_name))
+    return stored_name
+
+
+def parse_request_payload():
+    if request.content_type and request.content_type.startswith("multipart/form-data"):
+        return request.form, request.files
+    return request.get_json(silent=True) or {}, {}
 
 
 def parse_max_user(raw_user: str | dict | None) -> dict | None:
@@ -213,19 +255,6 @@ HTML_TEMPLATE = """
             gap: 10px;
         }
 
-        .welcome {
-            align-self: center;
-            background: rgba(33, 47, 60, 0.78);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 16px;
-            padding: 10px 14px;
-            text-align: center;
-            color: var(--tg-muted);
-            font-size: 13px;
-            max-width: 460px;
-            line-height: 1.5;
-        }
-
         .message-row {
             display: flex;
             gap: 8px;
@@ -276,6 +305,13 @@ HTML_TEMPLATE = """
             line-height: 1.45;
         }
 
+        .message-image {
+            display: block;
+            margin-top: 8px;
+            max-width: min(100%, 320px);
+            border-radius: 14px;
+        }
+
         .message-meta {
             margin-top: 6px;
             display: flex;
@@ -289,6 +325,11 @@ HTML_TEMPLATE = """
         .message-delete {
             cursor: pointer;
             color: #ffd5d5;
+        }
+
+        .message-action {
+            cursor: pointer;
+            color: #d7e9ff;
         }
 
         .empty {
@@ -327,6 +368,45 @@ HTML_TEMPLATE = """
             padding: 10px 12px;
             margin-bottom: 8px;
             font-size: 14px;
+        }
+
+        .attachment-row {
+            margin-top: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            justify-content: space-between;
+        }
+
+        .attach-btn {
+            border: none;
+            background: #223140;
+            color: #d7e9ff;
+            font: inherit;
+            border-radius: 14px;
+            padding: 8px 12px;
+            cursor: pointer;
+        }
+
+        .preview {
+            margin-top: 8px;
+            display: none;
+        }
+
+        .preview.show {
+            display: block;
+        }
+
+        .preview img {
+            max-width: 160px;
+            border-radius: 12px;
+            display: block;
+        }
+
+        .preview-actions {
+            margin-top: 6px;
+            display: flex;
+            gap: 8px;
         }
 
         textarea {
@@ -417,18 +497,26 @@ HTML_TEMPLATE = """
             <div class="subtitle" id="postLabel">Загрузка контекста поста...</div>
         </header>
 
-        <main class="feed" id="commentsList">
-            <div class="welcome">Мини-приложение открыто внутри MAX. Имя автора берётся из профиля MAX, а комментарии привязаны к `startapp` текущего поста.</div>
-        </main>
+        <main class="feed" id="commentsList"></main>
     </div>
 
     <div class="composer">
         <div class="composer-card">
             <div class="identity" id="identity">Автор: определяем профиль MAX...</div>
             <textarea id="comment" maxlength="1000" placeholder="Написать комментарий..."></textarea>
+            <div class="attachment-row">
+                <button class="attach-btn" id="attachBtn" type="button">Фото</button>
+                <input id="imageInput" type="file" accept="image/*" hidden>
+            </div>
+            <div class="preview" id="imagePreview">
+                <img id="previewImage" alt="preview">
+                <div class="preview-actions">
+                    <button class="attach-btn" id="removeImageBtn" type="button">Убрать фото</button>
+                </div>
+            </div>
             <div class="composer-actions">
                 <div>
-                    <div class="hint"><span id="charCount">0</span>/1000 • `Ctrl+Enter` для отправки</div>
+                    <div class="hint"><span id="charCount">0</span>/1000 • можно текст, эмодзи и фото</div>
                     <div class="status" id="status"></div>
                 </div>
                 <button id="submitBtn" class="send-btn" type="button">Отправить</button>
@@ -438,7 +526,6 @@ HTML_TEMPLATE = """
 
     <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
-        const webApp = window.WebApp || window.Maxi || null;
         const commentsList = document.getElementById("commentsList");
         const postLabel = document.getElementById("postLabel");
         const identity = document.getElementById("identity");
@@ -446,10 +533,18 @@ HTML_TEMPLATE = """
         const charCount = document.getElementById("charCount");
         const status = document.getElementById("status");
         const submitBtn = document.getElementById("submitBtn");
+        const attachBtn = document.getElementById("attachBtn");
+        const imageInput = document.getElementById("imageInput");
+        const imagePreview = document.getElementById("imagePreview");
+        const previewImage = document.getElementById("previewImage");
+        const removeImageBtn = document.getElementById("removeImageBtn");
 
         let initData = "";
         let postId = "";
         let currentUser = null;
+        let selectedImage = null;
+        let editingCommentId = null;
+        let latestComments = [];
 
         function resolveWebAppObject() {
             if (window.WebApp) return window.WebApp;
@@ -485,12 +580,7 @@ HTML_TEMPLATE = """
                 return String(appInstance.startParam).trim();
             }
             const params = new URLSearchParams(window.location.search);
-            return (
-                params.get("WebAppStartParam")
-                || params.get("startapp")
-                || params.get("post_id")
-                || ""
-            ).trim();
+            return (params.get("WebAppStartParam") || params.get("startapp") || params.get("post_id") || "").trim();
         }
 
         function getMaxUser(appInstance) {
@@ -504,10 +594,7 @@ HTML_TEMPLATE = """
             const userId = String(rawUser.user_id || rawUser.id || "").trim();
             if (!userId) return null;
 
-            return {
-                user_id: userId,
-                username: username
-            };
+            return { user_id: userId, username: username };
         }
 
         function getInitDataFallback(appInstance) {
@@ -535,25 +622,56 @@ HTML_TEMPLATE = """
             }
         }
 
+        function setPreviewFromFile(file) {
+            if (!file) {
+                imagePreview.classList.remove("show");
+                previewImage.removeAttribute("src");
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = () => {
+                previewImage.src = reader.result;
+                imagePreview.classList.add("show");
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function resetComposer() {
+            editingCommentId = null;
+            selectedImage = null;
+            commentInput.value = "";
+            charCount.textContent = "0";
+            imageInput.value = "";
+            imagePreview.classList.remove("show");
+            previewImage.removeAttribute("src");
+            submitBtn.textContent = "Отправить";
+        }
+
         function renderComments(comments) {
-            const welcome = '<div class="welcome">Это именно mini app внутри MAX. Для другого поста будет другой `startapp`, поэтому комментарии не смешиваются.</div>';
-            if (!comments.length) {
-                commentsList.innerHTML = welcome + '<div class="empty">Пока нет комментариев. Можно написать первый.</div>';
+            latestComments = comments || [];
+            if (!latestComments.length) {
+                commentsList.innerHTML = '<div class="empty">Пока нет комментариев. Можно написать первый.</div>';
                 return;
             }
 
-            commentsList.innerHTML = welcome + comments.reverse().map((comment) => {
+            commentsList.innerHTML = latestComments.reverse().map((comment) => {
                 const mine = currentUser && comment.user_id === currentUser.user_id;
                 const initial = escapeHtml((comment.username || "?").charAt(0).toUpperCase());
+                const imageHtml = comment.image_url ? `<img class="message-image" src="${comment.image_url}" alt="comment image">` : "";
+                const editedHtml = comment.edited_at ? '<span>изменено</span>' : "";
                 return `
                     <div class="message-row ${mine ? "mine" : ""}">
                         ${mine ? "" : `<div class="avatar">${initial}</div>`}
                         <div class="bubble">
                             <div class="message-name">${escapeHtml(comment.username)}</div>
                             <div class="message-text">${escapeHtml(comment.comment)}</div>
+                            ${imageHtml}
                             <div class="message-meta">
+                                <span class="message-action" onclick="shareComment(${comment.id})">Поделиться</span>
+                                ${mine ? `<span class="message-action" onclick="startEdit(${comment.id})">Ред.</span>` : ""}
                                 ${mine ? `<span class="message-delete" onclick="deleteComment(${comment.id})">Удалить</span>` : ""}
-                                <span>${formatDate(comment.created_at)}</span>
+                                ${editedHtml}
+                                <span>${formatDate(comment.edited_at || comment.created_at)}</span>
                             </div>
                         </div>
                         ${mine ? `<div class="avatar">${initial}</div>` : ""}
@@ -564,7 +682,7 @@ HTML_TEMPLATE = """
 
         async function loadComments() {
             if (!postId) {
-                commentsList.innerHTML = '<div class="empty">Не найден `startapp` от MAX. Открывайте приложение кнопкой мини-приложения, а не прямым URL.</div>';
+                commentsList.innerHTML = '<div class="empty">Не найден startapp для этого поста.</div>';
                 return;
             }
 
@@ -589,32 +707,36 @@ HTML_TEMPLATE = """
                 showStatus("Не удалось получить профиль пользователя из MAX", "error");
                 return;
             }
-            if (!comment) {
-                showStatus("Введите комментарий", "error");
+            if (!comment && !selectedImage && !editingCommentId) {
+                showStatus("Введите комментарий или выберите фото", "error");
                 commentInput.focus();
                 return;
             }
 
             submitBtn.disabled = true;
-            showStatus("Отправляем...", "");
+            showStatus(editingCommentId ? "Сохраняем..." : "Отправляем...", "");
 
             try {
-                const response = await fetch("/api/comment", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        post_id: postId,
-                        user_id: currentUser.user_id,
-                        username: currentUser.username,
-                        comment: comment,
-                        init_data: initData
-                    })
-                });
+                let response;
+                if (editingCommentId) {
+                    response = await fetch("/api/comment/" + editingCommentId, {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ comment: comment, init_data: initData })
+                    });
+                } else {
+                    const formData = new FormData();
+                    formData.append("post_id", postId);
+                    formData.append("comment", comment);
+                    formData.append("init_data", initData);
+                    if (selectedImage) formData.append("image", selectedImage);
+                    response = await fetch("/api/comment", { method: "POST", body: formData });
+                }
+
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Ошибка отправки");
-                commentInput.value = "";
-                charCount.textContent = "0";
-                showStatus("Комментарий отправлен", "success");
+                resetComposer();
+                showStatus(editingCommentId ? "Комментарий обновлён" : "Комментарий отправлен", "success");
                 await loadComments();
             } catch (error) {
                 showStatus(error.message || "Не удалось отправить комментарий", "error");
@@ -629,7 +751,7 @@ HTML_TEMPLATE = """
                 const response = await fetch("/api/comment/" + commentId, {
                     method: "DELETE",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ user_id: currentUser.user_id })
+                    body: JSON.stringify({ init_data: initData, user_id: currentUser.user_id })
                 });
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Ошибка удаления");
@@ -640,27 +762,51 @@ HTML_TEMPLATE = """
             }
         }
 
+        function startEdit(commentId) {
+            const comment = latestComments.find((item) => item.id === commentId);
+            if (!comment) return;
+            editingCommentId = commentId;
+            commentInput.value = comment.comment || "";
+            charCount.textContent = commentInput.value.length;
+            submitBtn.textContent = "Сохранить";
+            commentInput.focus();
+            showStatus("Редактирование комментария", "");
+        }
+
+        async function shareComment(commentId) {
+            const comment = latestComments.find((item) => item.id === commentId);
+            if (!comment) return;
+
+            const shareText = comment.comment || "Комментарий из MAX";
+            const appInstance = resolveWebAppObject();
+            try {
+                if (appInstance && typeof appInstance.shareContent === "function") {
+                    appInstance.shareContent(shareText, "");
+                    return;
+                }
+                if (navigator.share) {
+                    await navigator.share({ text: shareText });
+                    return;
+                }
+                await navigator.clipboard.writeText(shareText);
+                showStatus("Текст комментария скопирован", "success");
+            } catch (error) {
+                showStatus("Не удалось поделиться комментарием", "error");
+            }
+        }
+
         async function boot() {
             const appInstance = resolveWebAppObject();
-            if (appInstance && typeof appInstance.ready === "function") {
-                appInstance.ready();
-            }
-            if (appInstance && typeof appInstance.expand === "function") {
-                appInstance.expand();
-            }
+            if (appInstance && typeof appInstance.ready === "function") appInstance.ready();
+            if (appInstance && typeof appInstance.expand === "function") appInstance.expand();
 
             initData = getInitDataFallback(appInstance);
             postId = getStartParam(appInstance);
             currentUser = getMaxUser(appInstance);
             await hydrateUserFromServer();
 
-            postLabel.textContent = postId
-                ? "Пост: " + postId
-                : "Нет startapp. Если страница открыта как обычный URL, MAX данные не передаст.";
-
-            identity.textContent = currentUser
-                ? "Автор: " + currentUser.username
-                : "Автор: профиль MAX не найден";
+            postLabel.textContent = postId ? "Пост: " + postId : "";
+            identity.textContent = currentUser ? "Автор: " + currentUser.username : "Автор: профиль MAX не найден";
 
             commentInput.addEventListener("input", () => {
                 charCount.textContent = commentInput.value.length;
@@ -672,12 +818,24 @@ HTML_TEMPLATE = """
                 }
             });
             submitBtn.addEventListener("click", sendComment);
+            attachBtn.addEventListener("click", () => imageInput.click());
+            imageInput.addEventListener("change", () => {
+                selectedImage = imageInput.files && imageInput.files[0] ? imageInput.files[0] : null;
+                setPreviewFromFile(selectedImage);
+            });
+            removeImageBtn.addEventListener("click", () => {
+                selectedImage = null;
+                imageInput.value = "";
+                setPreviewFromFile(null);
+            });
 
             await loadComments();
             setInterval(loadComments, 8000);
         }
 
         window.deleteComment = deleteComment;
+        window.shareComment = shareComment;
+        window.startEdit = startEdit;
         boot();
     </script>
 </body>
@@ -708,7 +866,7 @@ def get_comments_by_post(post_id):
     conn = get_db_connection()
     rows = conn.execute(
         """
-        SELECT id, post_id, user_id, username, comment, created_at
+        SELECT id, post_id, user_id, username, comment, image_path, edited_at, created_at
         FROM comments
         WHERE post_id = ?
         ORDER BY created_at DESC
@@ -733,7 +891,7 @@ def get_post_count(post_id):
 
 @app.route("/api/comment", methods=["POST"])
 def add_comment():
-    payload = request.get_json(silent=True) or {}
+    payload, files = parse_request_payload()
     post_id = normalize_post_id(payload.get("post_id"))
     comment = normalize_comment(payload.get("comment"))
     verified_user = validate_max_init_data(payload.get("init_data", ""))
@@ -742,7 +900,11 @@ def add_comment():
         return jsonify({"error": "Не передан post_id"}), 400
     if not verified_user:
         return jsonify({"error": "Не удалось подтвердить пользователя MAX"}), 400
-    if not comment:
+    try:
+        image_path = save_uploaded_image(files.get("image")) if files else None
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    if not comment and not image_path:
         return jsonify({"error": "Комментарий пустой"}), 400
 
     created_at = datetime.now(timezone.utc).isoformat()
@@ -750,10 +912,10 @@ def add_comment():
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO comments (post_id, user_id, username, comment, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO comments (post_id, user_id, username, comment, image_path, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (post_id, verified_user["user_id"], verified_user["username"], comment, created_at),
+        (post_id, verified_user["user_id"], verified_user["username"], comment, image_path, created_at),
     )
     conn.commit()
     comment_id = cursor.lastrowid
@@ -768,30 +930,76 @@ def add_comment():
                 "user_id": verified_user["user_id"],
                 "username": verified_user["username"],
                 "comment": comment,
+                "image_url": build_file_url(image_path),
+                "edited_at": None,
                 "created_at": created_at,
             },
         }
     )
 
 
+@app.route("/api/comment/<int:comment_id>", methods=["PUT"])
+def edit_comment(comment_id):
+    payload = request.get_json(silent=True) or {}
+    comment = normalize_comment(payload.get("comment"))
+    verified_user = validate_max_init_data(payload.get("init_data", ""))
+
+    if not verified_user:
+        return jsonify({"error": "Не удалось подтвердить пользователя MAX"}), 400
+
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT id, image_path FROM comments WHERE id = ? AND user_id = ?",
+        (comment_id, verified_user["user_id"]),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Комментарий не найден или нет прав"}), 404
+    if not comment and not row["image_path"]:
+        conn.close()
+        return jsonify({"error": "Комментарий пустой"}), 400
+
+    edited_at = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE comments SET comment = ?, edited_at = ? WHERE id = ?",
+        (comment, edited_at, comment_id),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success", "edited_at": edited_at})
+
+
 @app.route("/api/comment/<int:comment_id>", methods=["DELETE"])
 def delete_comment(comment_id):
     payload = request.get_json(silent=True) or {}
-    user_id = (payload.get("user_id") or "").strip()[:128]
+    verified_user = validate_max_init_data(payload.get("init_data", ""))
+    user_id = (verified_user or {}).get("user_id") or (payload.get("user_id") or "").strip()[:128]
 
     if not user_id:
         return jsonify({"error": "Не передан user_id"}), 400
 
     conn = get_db_connection()
+    row = conn.execute("SELECT image_path FROM comments WHERE id = ? AND user_id = ?", (comment_id, user_id)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Комментарий не найден или нет прав"}), 404
+
     cursor = conn.cursor()
     cursor.execute("DELETE FROM comments WHERE id = ? AND user_id = ?", (comment_id, user_id))
     conn.commit()
-    deleted = cursor.rowcount
     conn.close()
 
-    if not deleted:
-        return jsonify({"error": "Комментарий не найден или нет прав"}), 404
+    image_path = row["image_path"]
+    if image_path:
+        image_file = os.path.join(UPLOAD_DIR, image_path)
+        if os.path.exists(image_file):
+            os.remove(image_file)
     return jsonify({"status": "success"})
+
+
+@app.route("/uploads/<path:filename>")
+def uploads(filename):
+    return send_from_directory(UPLOAD_DIR, filename)
 
 
 @app.route("/health")
