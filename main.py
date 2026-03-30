@@ -302,9 +302,29 @@ HTML_TEMPLATE = """
         .title {
             display: flex;
             align-items: center;
+            justify-content: space-between;
             gap: 10px;
             font-size: 17px;
             font-weight: 700;
+        }
+
+        .title-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .title-user {
+            max-width: 48%;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.06);
+            color: #d7e9ff;
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .title-dot {
@@ -399,6 +419,7 @@ HTML_TEMPLATE = """
             border-radius: 18px 18px 18px 6px;
             background: var(--tg-incoming);
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+            overflow: hidden;
         }
 
         .message-row.mine .bubble {
@@ -508,6 +529,7 @@ HTML_TEMPLATE = """
             padding: 8px 10px;
             margin-bottom: 6px;
             font-size: 12px;
+            display: none;
         }
 
         .reply-box {
@@ -529,11 +551,13 @@ HTML_TEMPLATE = """
             z-index: 30;
             display: none;
             gap: 8px;
+            flex-wrap: wrap;
             padding: 8px;
             border-radius: 18px;
             background: rgba(23, 33, 43, 0.98);
             border: 1px solid var(--tg-panel-border);
             box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
+            max-width: min(92vw, 320px);
         }
 
         .reaction-menu.show {
@@ -651,6 +675,7 @@ HTML_TEMPLATE = """
             z-index: 31;
             display: none;
             min-width: 160px;
+            max-width: min(92vw, 240px);
             padding: 6px;
             border-radius: 16px;
             background: rgba(23, 33, 43, 0.99);
@@ -700,6 +725,15 @@ HTML_TEMPLATE = """
 
             .send-btn {
                 width: 100%;
+            }
+
+            .title {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .title-user {
+                max-width: 100%;
             }
         }
     </style>
