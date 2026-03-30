@@ -1,9 +1,13 @@
 from flask import Flask, request, jsonify, render_template_string
+from flask_socketio import SocketIO, emit, join_room
 import sqlite3
 from datetime import datetime
 import json
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'secret!'
+socketio = SocketIO(app, cors_allowed_origins="*")
+
 DB_PATH = "comments.db"
 
 def init_db():
@@ -34,6 +38,7 @@ HTML = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
     <title>Комментарии</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -50,7 +55,6 @@ HTML = """
             flex-direction: column;
         }
         
-        /* Шапка */
         .chat-header {
             background: #1e1e22;
             padding: 12px 16px;
@@ -70,7 +74,6 @@ HTML = """
             margin-top: 4px;
         }
         
-        /* Область сообщений */
         .messages-area {
             flex: 1;
             overflow-y: auto;
@@ -80,7 +83,6 @@ HTML = """
             gap: 8px;
         }
         
-        /* Сообщение */
         .message {
             display: flex;
             gap: 10px;
@@ -167,7 +169,6 @@ HTML = """
             color: #0a84ff;
         }
         
-        /* Ответы */
         .reply-toggle {
             font-size: 11px;
             color: #8e8e93;
@@ -183,14 +184,12 @@ HTML = """
             display: none;
         }
         
-        /* Пустое состояние */
         .empty-state {
             text-align: center;
             padding: 60px 20px;
             color: #8e8e93;
         }
         
-        /* Форма внизу */
         .input-bar {
             background: #1e1e22;
             border-top: 1px solid #2a2a2e;
@@ -281,12 +280,6 @@ HTML = """
             from { opacity: 0; transform: translateY(5px); }
             to { opacity: 1; transform: translateY(0); }
         }
-        
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #8e8e93;
-        }
     </style>
 </head>
 <body>
@@ -296,7 +289,7 @@ HTML = """
     </div>
     
     <div id="messagesContainer" class="messages-area">
-        <div class="loading">Загрузка...</div>
+        <div class="empty-state">Загрузка...</div>
     </div>
     
     <div id="replyIndicator" class="reply-indicator">
@@ -316,51 +309,27 @@ HTML = """
     <div id="status" class="status"></div>
 
     <script>
-        // Получаем ID поста из URL
         const urlParams = new URLSearchParams(window.location.search);
         let postId = urlParams.get('startapp') || urlParams.get('post') || 'general';
         document.getElementById('postIdDisplay').innerHTML = postId.length > 35 ? postId.substring(0, 35) + '...' : postId;
         
-        // ⭐ ПОЛУЧАЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ ИЗ MAX (работает и на телефоне, и на компьютере)
-        let userId = null;
-        let userName = null;
-        
-        // Пытаемся получить данные из WebApp
-        try {
-            // Проверяем, открыто ли приложение в MAX
-            if (window.TelegramWebApp || window.Maxi || window.MAX) {
-                const webApp = window.TelegramWebApp || window.Maxi || window.MAX;
-                if (webApp.initDataUnsafe && webApp.initDataUnsafe.user) {
-                    const user = webApp.initDataUnsafe.user;
-                    userId = user.id.toString();
-                    userName = user.first_name + (user.last_name ? ' ' + user.last_name : '');
-                }
-            }
-        } catch(e) {
-            console.log('MAX API не доступен');
-        }
-        
-        // Если не получили из MAX, используем localStorage
+        // Получаем данные пользователя
+        let userId = localStorage.getItem('comment_user_id');
         if (!userId) {
-            userId = localStorage.getItem('comment_user_id');
-            if (!userId) {
-                userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
-                localStorage.setItem('comment_user_id', userId);
-            }
+            userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+            localStorage.setItem('comment_user_id', userId);
         }
         
+        let userName = localStorage.getItem('comment_username');
         if (!userName) {
-            userName = localStorage.getItem('comment_username');
-            if (!userName) {
-                // Пробуем получить имя из URL параметра username
-                const urlName = urlParams.get('username');
-                if (urlName) {
-                    userName = urlName;
-                } else {
-                    userName = 'Гость';
-                }
-                localStorage.setItem('comment_username', userName);
+            const urlName = urlParams.get('username');
+            if (urlName) {
+                userName = urlName;
+            } else {
+                userName = prompt('Введите ваше имя:', 'Гость');
+                if (!userName) userName = 'Гость';
             }
+            localStorage.setItem('comment_username', userName);
         }
         
         let replyToId = null;
@@ -380,6 +349,16 @@ HTML = """
             }
         });
         
+        // WebSocket подключение
+        const socket = io();
+        socket.emit('join', postId);
+        
+        socket.on('new_comment', function(comment) {
+            console.log('Новый комментарий:', comment);
+            addCommentToTop(comment);
+            showStatus('💬 Новый комментарий!', 'success');
+        });
+        
         function getAvatarColor(name) {
             let hash = 0;
             for (let i = 0; i < name.length; i++) {
@@ -390,7 +369,7 @@ HTML = """
             return colors[Math.abs(hash) % colors.length];
         }
         
-        // Загрузка комментариев
+        // Загрузка всех комментариев при старте
         async function loadMessages() {
             try {
                 const response = await fetch(`/api/comments/${encodeURIComponent(postId)}`);
@@ -435,7 +414,6 @@ HTML = """
                 container.scrollTop = container.scrollHeight;
             } catch (error) {
                 console.error(error);
-                document.getElementById('messagesContainer').innerHTML = '<div class="empty-state">⚠️ Ошибка загрузки</div>';
             }
         }
         
@@ -470,6 +448,42 @@ HTML = """
                 </div>
             `;
             container.appendChild(div);
+        }
+        
+        function addCommentToTop(comment) {
+            const container = document.getElementById('messagesContainer');
+            const time = new Date(comment.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+            const avatarColor = getAvatarColor(comment.username);
+            const letter = (comment.username.charAt(0) || '?').toUpperCase();
+            const isMine = comment.user_id === userId;
+            
+            const div = document.createElement('div');
+            div.className = 'message';
+            div.id = `msg-${comment.id}`;
+            div.innerHTML = `
+                <div class="message-avatar" style="background: ${avatarColor}">${escapeHtml(letter)}</div>
+                <div class="message-content">
+                    <div class="message-header">
+                        <span class="message-name">${escapeHtml(comment.username)}</span>
+                        ${isMine ? '<span class="message-badge">Вы</span>' : ''}
+                        <span class="message-time">${time}</span>
+                    </div>
+                    <div class="message-text">${escapeHtml(comment.comment)}</div>
+                    <div class="message-actions">
+                        <button class="like-btn" onclick="likeComment(${comment.id})">❤️ 0</button>
+                        <button class="reply-btn" onclick="setReply(${comment.id}, '${escapeHtml(comment.username)}')">💬 Ответить</button>
+                        ${isMine ? `<button onclick="editComment(${comment.id}, '${escapeHtml(comment.comment).replace(/'/g, "\\'")}')">✏️</button>` : ''}
+                        ${isMine ? `<button onclick="deleteComment(${comment.id})">🗑</button>` : ''}
+                    </div>
+                </div>
+            `;
+            
+            const emptyState = container.querySelector('.empty-state');
+            if (emptyState) {
+                container.innerHTML = '';
+            }
+            container.insertBefore(div, container.firstChild);
+            container.scrollTop = container.scrollHeight;
         }
         
         function addReplyToDOM(container, reply) {
@@ -544,7 +558,6 @@ HTML = """
                     messageInput.value = '';
                     messageInput.style.height = 'auto';
                     cancelReply();
-                    await loadMessages();
                     showStatus('✅ Отправлено!', 'success');
                 } else {
                     showStatus('❌ Ошибка', 'error');
@@ -600,9 +613,7 @@ HTML = """
             return div.innerHTML;
         }
         
-        // ⭐ АВТООБНОВЛЕНИЕ КОММЕНТАРИЕВ КАЖДЫЕ 3 СЕКУНДЫ
         loadMessages();
-        setInterval(loadMessages, 3000);
     </script>
 </body>
 </html>
@@ -630,7 +641,18 @@ def add_comment():
     c.execute("INSERT INTO comments (post_id, parent_id, user_id, username, comment, created_at, liked_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
               (data["post_id"], data.get("parent_id", 0), data["user_id"], data["username"], data["comment"], datetime.now().isoformat(), json.dumps([])))
     conn.commit()
+    
+    # Получаем новый комментарий для отправки через WebSocket
+    comment_id = c.lastrowid
+    c.execute("SELECT id, parent_id, user_id, username, comment, likes, liked_by, created_at FROM comments WHERE id = ?", (comment_id,))
+    row = c.fetchone()
     conn.close()
+    
+    new_comment = {"id": row[0], "parent_id": row[1] or 0, "user_id": row[2], "username": row[3], "comment": row[4], "likes": row[5], "liked_by": row[6], "created_at": row[7]}
+    
+    # Отправляем всем в комнате
+    socketio.emit('new_comment', new_comment, room=data["post_id"])
+    
     return jsonify({"ok": True})
 
 @app.route('/api/comment/<int:id>/like', methods=['POST'])
@@ -676,5 +698,11 @@ def delete_comment(id):
 def health():
     return jsonify({"status": "ok"})
 
+@socketio.on('join')
+def on_join(data):
+    room = data
+    join_room(room)
+    print(f"Клиент подключился к комнате {room}")
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    socketio.run(app, host="0.0.0.0", port=8000, debug=True)
