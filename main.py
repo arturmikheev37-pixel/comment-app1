@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import uuid
+import zipfile
 from urllib.parse import parse_qsl
 from urllib.request import Request, urlopen
 
@@ -16,21 +18,30 @@ app = Flask(__name__)
 BASE_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(BASE_DIR, "comments.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+BACKUP_DIR = os.getenv("COMMENTS_BACKUP_DIR", os.path.join(BASE_DIR, "backups"))
+BACKUP_RETENTION = max(3, int(os.getenv("COMMENTS_BACKUP_RETENTION", "20")))
+STORE_ARCHIVE_PATH = os.getenv("COMMENTS_STORE_ARCHIVE", os.path.join(BASE_DIR, "comment_store.zip"))
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "f9LHodD0cOIdrNPjh3CWiZlW8bj-DhNpjF6VBTWDQP66-wijDIChpbtLyNZeZOtubmx3thZhMxQe7j8oXnCq").strip()
 BOT_USERNAME = os.getenv("MAX_BOT_USERNAME", "id250300578953_1_bot").strip()
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".heic", ".heif", ".avif"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv", ".3gp"}
 ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+BACKUP_LOCK = threading.Lock()
 
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(BACKUP_DIR, exist_ok=True)
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -101,6 +112,128 @@ def init_db():
     )
     conn.commit()
     conn.close()
+
+
+def restore_store_archive_if_needed():
+    needs_restore = (not os.path.exists(DB_PATH)) or (not os.path.isdir(UPLOAD_DIR))
+    if not needs_restore or not os.path.exists(STORE_ARCHIVE_PATH):
+        return False
+
+    with BACKUP_LOCK:
+        try:
+            os.makedirs(BASE_DIR, exist_ok=True)
+            with zipfile.ZipFile(STORE_ARCHIVE_PATH, "r") as archive:
+                members = archive.namelist()
+                if "comments.db" in members:
+                    archive.extract("comments.db", BASE_DIR)
+                if "comments.db-wal" in members:
+                    archive.extract("comments.db-wal", BASE_DIR)
+                if "comments.db-shm" in members:
+                    archive.extract("comments.db-shm", BASE_DIR)
+                upload_members = [name for name in members if name.startswith("uploads/")]
+                if upload_members:
+                    os.makedirs(UPLOAD_DIR, exist_ok=True)
+                    for member in upload_members:
+                        archive.extract(member, BASE_DIR)
+            return True
+        except Exception as error:
+            print(f"Не удалось восстановить данные из {STORE_ARCHIVE_PATH}: {error}")
+            return False
+
+
+def prune_backups():
+    entries = []
+    for name in os.listdir(BACKUP_DIR):
+        if not name.startswith("comments-backup-") or not name.endswith(".zip"):
+            continue
+        path = os.path.join(BACKUP_DIR, name)
+        if os.path.isfile(path):
+            entries.append((os.path.getmtime(path), path))
+    entries.sort(reverse=True)
+    for _, path in entries[BACKUP_RETENTION:]:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def create_backup(reason: str = "manual") -> str | None:
+    if not os.path.exists(DB_PATH):
+        return None
+
+    safe_reason = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in reason.lower()).strip("-") or "manual"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    archive_path = os.path.join(BACKUP_DIR, f"comments-backup-{timestamp}-{safe_reason}.zip")
+
+    with BACKUP_LOCK:
+        try:
+            wal_path = DB_PATH + "-wal"
+            shm_path = DB_PATH + "-shm"
+            manifest = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "reason": reason,
+                "db_path": DB_PATH,
+                "upload_dir": UPLOAD_DIR,
+            }
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(DB_PATH, arcname="comments.db")
+                if os.path.exists(wal_path):
+                    archive.write(wal_path, arcname="comments.db-wal")
+                if os.path.exists(shm_path):
+                    archive.write(shm_path, arcname="comments.db-shm")
+                if os.path.isdir(UPLOAD_DIR):
+                    for root, _, files in os.walk(UPLOAD_DIR):
+                        for file_name in files:
+                            file_path = os.path.join(root, file_name)
+                            rel_path = os.path.relpath(file_path, BASE_DIR)
+                            archive.write(file_path, arcname=rel_path)
+                archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            prune_backups()
+            return archive_path
+        except Exception as error:
+            print(f"Не удалось создать backup ({reason}): {error}")
+            return None
+
+
+def update_store_archive(reason: str = "sync") -> str | None:
+    if not os.path.exists(DB_PATH):
+        return None
+
+    temp_archive_path = STORE_ARCHIVE_PATH + ".tmp"
+    with BACKUP_LOCK:
+        try:
+            wal_path = DB_PATH + "-wal"
+            shm_path = DB_PATH + "-shm"
+            manifest = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "reason": reason,
+                "db_path": os.path.basename(DB_PATH),
+                "uploads_dir": os.path.basename(UPLOAD_DIR),
+                "archive_type": "comment_store",
+            }
+            with zipfile.ZipFile(temp_archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(DB_PATH, arcname="comments.db")
+                if os.path.exists(wal_path):
+                    archive.write(wal_path, arcname="comments.db-wal")
+                if os.path.exists(shm_path):
+                    archive.write(shm_path, arcname="comments.db-shm")
+                if os.path.isdir(UPLOAD_DIR):
+                    for root, _, files in os.walk(UPLOAD_DIR):
+                        for file_name in files:
+                            file_path = os.path.join(root, file_name)
+                            rel_path = os.path.relpath(file_path, BASE_DIR)
+                            archive.write(file_path, arcname=rel_path)
+                archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            os.replace(temp_archive_path, STORE_ARCHIVE_PATH)
+            return STORE_ARCHIVE_PATH
+        except Exception as error:
+            print(f"Не удалось обновить store archive ({reason}): {error}")
+            try:
+                if os.path.exists(temp_archive_path):
+                    os.remove(temp_archive_path)
+            except OSError:
+                pass
+            return None
 
 
 def normalize_post_id(raw_post_id: str | None) -> str:
@@ -1245,6 +1378,8 @@ def register_post():
     )
     conn.commit()
     conn.close()
+    update_store_archive("post-upsert")
+    create_backup("post-upsert")
     return jsonify({"status": "success"})
 
 
@@ -1315,6 +1450,8 @@ def add_comment():
     conn.commit()
     comment_id = cursor.lastrowid
     conn.close()
+    update_store_archive("comment-create")
+    create_backup("comment-create")
     refresh_post_button(post_id)
 
     return jsonify({"status": "success", "comment": {"id": comment_id}})
@@ -1344,6 +1481,8 @@ def edit_comment(comment_id):
     conn.execute("UPDATE comments SET comment = ?, edited_at = ? WHERE id = ?", (comment, edited_at, comment_id))
     conn.commit()
     conn.close()
+    update_store_archive("comment-edit")
+    create_backup("comment-edit")
     return jsonify({"status": "success", "edited_at": edited_at})
 
 
@@ -1369,6 +1508,8 @@ def delete_comment(comment_id):
         file_path = os.path.join(UPLOAD_DIR, row["media_path"])
         if os.path.exists(file_path):
             os.remove(file_path)
+    update_store_archive("comment-delete")
+    create_backup("comment-delete")
     refresh_post_button(row["post_id"])
     return jsonify({"status": "success"})
 
@@ -1380,10 +1521,29 @@ def uploads(filename):
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "db_exists": os.path.exists(DB_PATH)})
+    backups = []
+    if os.path.isdir(BACKUP_DIR):
+        for name in sorted(os.listdir(BACKUP_DIR), reverse=True):
+            if name.endswith(".zip"):
+                backups.append(name)
+            if len(backups) >= 5:
+                break
+    return jsonify(
+        {
+            "status": "ok",
+            "db_exists": os.path.exists(DB_PATH),
+            "store_archive_exists": os.path.exists(STORE_ARCHIVE_PATH),
+            "store_archive_path": STORE_ARCHIVE_PATH,
+            "backup_dir": BACKUP_DIR,
+            "recent_backups": backups,
+        }
+    )
 
 
+restore_store_archive_if_needed()
 init_db()
+update_store_archive("startup")
+create_backup("startup")
 
 
 if __name__ == "__main__":
