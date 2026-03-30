@@ -680,9 +680,83 @@ HTML_TEMPLATE = """
             border-radius: 14px;
         }
 
+        .message-image {
+            cursor: zoom-in;
+        }
+
         .message-video {
             width: 100%;
             background: #000;
+        }
+
+        .media-link {
+            display: inline-block;
+            margin-top: 8px;
+            color: #8fc9ff;
+            font-size: 12px;
+            text-decoration: none;
+        }
+
+        .media-link:hover {
+            text-decoration: underline;
+        }
+
+        .media-viewer {
+            position: fixed;
+            inset: 0;
+            z-index: 60;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(2, 8, 15, 0.92);
+            backdrop-filter: blur(10px);
+        }
+
+        .media-viewer.show {
+            display: flex;
+        }
+
+        .media-viewer-dialog {
+            position: relative;
+            width: min(100%, 980px);
+            max-height: min(100%, 92vh);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            border-radius: 24px;
+            background: rgba(18, 27, 38, 0.96);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+        }
+
+        .media-viewer-image,
+        .media-viewer-video {
+            max-width: 100%;
+            max-height: calc(92vh - 64px);
+            border-radius: 18px;
+            display: block;
+            background: #000;
+        }
+
+        .media-viewer-close {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            width: 40px;
+            height: 40px;
+            border: none;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            font-size: 22px;
+            line-height: 1;
+            cursor: pointer;
+        }
+
+        .media-viewer-close:hover {
+            background: rgba(255, 255, 255, 0.18);
         }
 
         .message-meta {
@@ -938,6 +1012,13 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="context-menu" id="contextMenu"></div>
+    <div class="media-viewer" id="mediaViewer" aria-hidden="true">
+        <div class="media-viewer-dialog" id="mediaViewerDialog">
+            <button class="media-viewer-close" id="mediaViewerClose" type="button" aria-label="Закрыть">×</button>
+            <img class="media-viewer-image" id="mediaViewerImage" alt="full media" hidden>
+            <video class="media-viewer-video" id="mediaViewerVideo" controls playsinline hidden></video>
+        </div>
+    </div>
 
     <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
@@ -957,6 +1038,11 @@ HTML_TEMPLATE = """
         const replyBox = document.getElementById("replyBox");
         const contextMenu = document.getElementById("contextMenu");
         const composer = document.querySelector(".composer");
+        const mediaViewer = document.getElementById("mediaViewer");
+        const mediaViewerDialog = document.getElementById("mediaViewerDialog");
+        const mediaViewerImage = document.getElementById("mediaViewerImage");
+        const mediaViewerVideo = document.getElementById("mediaViewerVideo");
+        const mediaViewerClose = document.getElementById("mediaViewerClose");
 
         let initData = "";
         let postId = "";
@@ -1014,13 +1100,13 @@ HTML_TEMPLATE = """
 
         async function compressImageFile(file) {
             const fileType = (file.type || "").toLowerCase();
-            if (!fileType.startsWith("image/") || fileType === "image/gif" || file.size < 1_500_000) {
+            if (!fileType.startsWith("image/") || fileType === "image/gif" || file.size < 900_000) {
                 return file;
             }
 
             const image = await loadImageElement(file);
-            const maxWidth = 1920;
-            const maxHeight = 1920;
+            const maxWidth = 1600;
+            const maxHeight = 1600;
             const scale = Math.min(1, maxWidth / image.width, maxHeight / image.height);
             const width = Math.max(1, Math.round(image.width * scale));
             const height = Math.max(1, Math.round(image.height * scale));
@@ -1031,7 +1117,7 @@ HTML_TEMPLATE = """
             context.drawImage(image, 0, 0, width, height);
 
             const blob = await new Promise((resolve) => {
-                canvas.toBlob(resolve, "image/jpeg", 0.82);
+                canvas.toBlob(resolve, "image/jpeg", 0.76);
             });
             if (!blob || blob.size >= file.size) {
                 return file;
@@ -1043,6 +1129,34 @@ HTML_TEMPLATE = """
         function syncComposerSpace() {
             const height = composer ? composer.offsetHeight : 120;
             document.documentElement.style.setProperty("--composer-space", `${height}px`);
+        }
+
+        function closeMediaViewer() {
+            mediaViewer.classList.remove("show");
+            mediaViewer.setAttribute("aria-hidden", "true");
+            mediaViewerImage.removeAttribute("src");
+            mediaViewerImage.hidden = true;
+            mediaViewerVideo.pause();
+            mediaViewerVideo.removeAttribute("src");
+            mediaViewerVideo.hidden = true;
+            mediaViewerVideo.load();
+            document.body.style.overflow = "";
+        }
+
+        function openMediaViewer(url, mediaType) {
+            if (!url) return;
+            const isVideo = mediaType === "video";
+            mediaViewerImage.hidden = isVideo;
+            mediaViewerVideo.hidden = !isVideo;
+            if (isVideo) {
+                mediaViewerVideo.src = url;
+                mediaViewerVideo.load();
+            } else {
+                mediaViewerImage.src = url;
+            }
+            mediaViewer.classList.add("show");
+            mediaViewer.setAttribute("aria-hidden", "false");
+            document.body.style.overflow = "hidden";
         }
 
         function jumpToComment(commentId) {
@@ -1158,10 +1272,11 @@ HTML_TEMPLATE = """
         function renderCommentNode(comment, replyMap) {
             const mine = currentUser && comment.user_id === currentUser.user_id;
             const initial = escapeHtml((comment.username || "?").charAt(0).toUpperCase());
+            const mediaUrl = comment.image_url ? encodeURI(comment.image_url) : "";
             const mediaHtml = comment.image_url
                 ? (comment.media_type === "video"
-                    ? `<video class="message-video" src="${comment.image_url}" controls playsinline preload="metadata"></video>`
-                    : `<img class="message-image" src="${comment.image_url}" alt="comment media">`)
+                    ? `<video class="message-video" src="${mediaUrl}" controls playsinline preload="metadata"></video><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'video'); return false;">Открыть видео</a>`
+                    : `<img class="message-image" src="${mediaUrl}" alt="comment media" loading="lazy" onclick="openMediaViewer('${mediaUrl}', 'image')"><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'image'); return false;">Открыть фото</a>`)
                 : "";
             const editedHtml = comment.edited_at ? '<span>изменено</span>' : "";
             const parentPreview = comment.parent_preview ? `<div class="reply-pill" onclick="jumpToComment(${comment.parent_id})">Ответ для ${escapeHtml(comment.parent_preview.username)}: ${escapeHtml(comment.parent_preview.comment)}</div>` : "";
@@ -1452,6 +1567,20 @@ HTML_TEMPLATE = """
                     closeContextMenu();
                 }
             });
+            mediaViewer.addEventListener("click", (event) => {
+                if (event.target === mediaViewer) {
+                    closeMediaViewer();
+                }
+            });
+            mediaViewerDialog.addEventListener("click", (event) => {
+                event.stopPropagation();
+            });
+            mediaViewerClose.addEventListener("click", closeMediaViewer);
+            document.addEventListener("keydown", (event) => {
+                if (event.key === "Escape" && mediaViewer.classList.contains("show")) {
+                    closeMediaViewer();
+                }
+            });
             window.addEventListener("resize", syncComposerSpace);
 
             syncComposerSpace();
@@ -1463,6 +1592,7 @@ HTML_TEMPLATE = """
         window.menuEdit = menuEdit;
         window.menuDelete = menuDelete;
         window.jumpToComment = jumpToComment;
+        window.openMediaViewer = openMediaViewer;
         boot();
     </script>
 </body>
