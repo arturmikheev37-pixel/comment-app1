@@ -320,6 +320,7 @@ HTML_TEMPLATE = """
             color: var(--tg-muted);
             font-size: 12px;
             word-break: break-all;
+            display: none;
         }
 
         .post-card {
@@ -530,6 +531,36 @@ HTML_TEMPLATE = """
             display: block;
         }
 
+        .reaction-menu {
+            position: fixed;
+            z-index: 30;
+            display: none;
+            gap: 8px;
+            padding: 8px;
+            border-radius: 18px;
+            background: rgba(23, 33, 43, 0.98);
+            border: 1px solid var(--tg-panel-border);
+            box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
+        }
+
+        .reaction-menu.show {
+            display: flex;
+        }
+
+        .reaction-menu button {
+            border: none;
+            background: transparent;
+            color: white;
+            font-size: 22px;
+            cursor: pointer;
+            padding: 4px 6px;
+            border-radius: 12px;
+        }
+
+        .reaction-menu button:hover {
+            background: rgba(255, 255, 255, 0.08);
+        }
+
         .attachment-row {
             margin-top: 8px;
             display: flex;
@@ -688,6 +719,7 @@ HTML_TEMPLATE = """
             </div>
         </div>
     </div>
+    <div class="reaction-menu" id="reactionMenu"></div>
 
     <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
@@ -706,6 +738,7 @@ HTML_TEMPLATE = """
         const postCard = document.getElementById("postCard");
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
+        const reactionMenu = document.getElementById("reactionMenu");
 
         let initData = "";
         let postId = "";
@@ -716,6 +749,8 @@ HTML_TEMPLATE = """
         let replyToCommentId = null;
         let postInfo = null;
         const reactionOptions = ["👍", "❤️", "🔥", "😂"];
+        let reactionMenuCommentId = null;
+        let longPressTimer = null;
 
         function resolveWebAppObject() {
             if (window.WebApp) return window.WebApp;
@@ -842,7 +877,7 @@ HTML_TEMPLATE = """
                 <div class="message-thread">
                     <div class="message-row ${mine ? "mine" : ""}">
                         ${mine ? "" : `<div class="avatar">${initial}</div>`}
-                        <div class="bubble">
+                        <div class="bubble" data-comment-id="${comment.id}">
                             <div class="message-name">${escapeHtml(comment.username)}</div>
                             ${parentPreview}
                             <div class="message-text">${escapeHtml(comment.comment)}</div>
@@ -850,7 +885,6 @@ HTML_TEMPLATE = """
                             <div class="reactions">${renderReactionButtons(comment)}</div>
                             <div class="message-meta">
                                 <span class="message-action" onclick="startReply(${comment.id})">Ответить</span>
-                                <span class="message-action" onclick="shareComment(${comment.id})">Поделиться</span>
                                 ${mine ? `<span class="message-action" onclick="startEdit(${comment.id})">Ред.</span>` : ""}
                                 ${mine ? `<span class="message-delete" onclick="deleteComment(${comment.id})">Удалить</span>` : ""}
                                 ${editedHtml}
@@ -903,8 +937,11 @@ HTML_TEMPLATE = """
                 if (postInfo && postInfo.post_text) {
                     postCard.hidden = false;
                     postCardText.textContent = postInfo.post_text;
+                } else {
+                    postCard.hidden = true;
                 }
                 renderComments(data.comments || []);
+                bindLongPressHandlers();
             } catch (error) {
                 commentsList.innerHTML = '<div class="empty">Не удалось загрузить комментарии.</div>';
             }
@@ -1018,26 +1055,46 @@ HTML_TEMPLATE = """
             }
         }
 
-        async function shareComment(commentId) {
-            const comment = latestComments.find((item) => item.id === commentId);
-            if (!comment) return;
+        function openReactionMenu(commentId, targetElement) {
+            reactionMenuCommentId = commentId;
+            reactionMenu.innerHTML = reactionOptions.map((emoji) => {
+                return `<button type="button" onclick="pickReaction(${JSON.stringify(emoji)})">${emoji}</button>`;
+            }).join("");
+            const rect = targetElement.getBoundingClientRect();
+            reactionMenu.style.left = Math.max(8, rect.left) + "px";
+            reactionMenu.style.top = Math.max(8, rect.top - 58) + "px";
+            reactionMenu.classList.add("show");
+        }
 
-            const shareText = comment.comment || "Комментарий из MAX";
-            const appInstance = resolveWebAppObject();
-            try {
-                if (appInstance && typeof appInstance.shareContent === "function") {
-                    appInstance.shareContent(shareText, "");
-                    return;
-                }
-                if (navigator.share) {
-                    await navigator.share({ text: shareText });
-                    return;
-                }
-                await navigator.clipboard.writeText(shareText);
-                showStatus("Текст комментария скопирован", "success");
-            } catch (error) {
-                showStatus("Не удалось поделиться комментарием", "error");
-            }
+        function closeReactionMenu() {
+            reactionMenu.classList.remove("show");
+            reactionMenuCommentId = null;
+        }
+
+        function bindLongPressHandlers() {
+            document.querySelectorAll(".bubble[data-comment-id]").forEach((bubble) => {
+                const commentId = Number(bubble.dataset.commentId);
+                const start = (event) => {
+                    if (event.target.closest(".reaction-btn, .message-action, .message-delete")) return;
+                    clearTimeout(longPressTimer);
+                    longPressTimer = setTimeout(() => openReactionMenu(commentId, bubble), 450);
+                };
+                const cancel = () => {
+                    clearTimeout(longPressTimer);
+                };
+                bubble.onmousedown = start;
+                bubble.ontouchstart = start;
+                bubble.onmouseup = cancel;
+                bubble.onmouseleave = cancel;
+                bubble.ontouchend = cancel;
+                bubble.ontouchcancel = cancel;
+            });
+        }
+
+        async function pickReaction(reaction) {
+            if (!reactionMenuCommentId) return;
+            closeReactionMenu();
+            await toggleReaction(reactionMenuCommentId, reaction);
         }
 
         async function boot() {
@@ -1051,6 +1108,7 @@ HTML_TEMPLATE = """
             await hydrateUserFromServer();
 
             postLabel.textContent = postId ? "Пост: " + postId : "";
+            postLabel.textContent = "";
             identity.textContent = currentUser ? "Автор: " + currentUser.username : "Автор: профиль MAX не найден";
 
             commentInput.addEventListener("input", () => {
@@ -1073,16 +1131,21 @@ HTML_TEMPLATE = """
                 imageInput.value = "";
                 setPreviewFromFile(null);
             });
+            document.addEventListener("click", (event) => {
+                if (!reactionMenu.contains(event.target)) {
+                    closeReactionMenu();
+                }
+            });
 
             await loadComments();
             setInterval(loadComments, 8000);
         }
 
         window.deleteComment = deleteComment;
-        window.shareComment = shareComment;
         window.startEdit = startEdit;
         window.startReply = startReply;
         window.toggleReaction = toggleReaction;
+        window.pickReaction = pickReaction;
         boot();
     </script>
 </body>
