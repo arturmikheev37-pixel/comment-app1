@@ -624,10 +624,17 @@ HTML_TEMPLATE = """
             background: rgba(255, 255, 255, 0.08);
         }
 
-        .scroll-down {
+        .scroll-nav {
             position: fixed;
             right: max(12px, calc((100vw - min(760px, 100vw)) / 2 + 12px));
             bottom: calc(86px + env(safe-area-inset-bottom));
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            z-index: 20;
+        }
+
+        .scroll-btn {
             width: 42px;
             height: 42px;
             border: none;
@@ -637,12 +644,6 @@ HTML_TEMPLATE = """
             font-size: 18px;
             cursor: pointer;
             box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
-            display: none;
-            z-index: 20;
-        }
-
-        .scroll-down.show {
-            display: block;
         }
 
         .jump-highlight {
@@ -712,7 +713,10 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="context-menu" id="contextMenu"></div>
-    <button class="scroll-down" id="scrollDownBtn" type="button">↓</button>
+    <div class="scroll-nav">
+        <button class="scroll-btn" id="scrollUpBtn" type="button">↑</button>
+        <button class="scroll-btn" id="scrollDownBtn" type="button">↓</button>
+    </div>
 
     <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
@@ -730,6 +734,7 @@ HTML_TEMPLATE = """
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
         const contextMenu = document.getElementById("contextMenu");
+        const scrollUpBtn = document.getElementById("scrollUpBtn");
         const scrollDownBtn = document.getElementById("scrollDownBtn");
 
         let initData = "";
@@ -762,14 +767,6 @@ HTML_TEMPLATE = """
 
         function isNearBottom() {
             return window.innerHeight + window.scrollY >= document.body.offsetHeight - 140;
-        }
-
-        function updateScrollDownButton() {
-            if (isNearBottom()) {
-                scrollDownBtn.classList.remove("show");
-            } else {
-                scrollDownBtn.classList.add("show");
-            }
         }
 
         function scrollToBottom(force = false) {
@@ -904,7 +901,6 @@ HTML_TEMPLATE = """
             latestComments = comments || [];
             if (!latestComments.length) {
                 commentsList.innerHTML = '<div class="empty">Пока нет комментариев. Можно написать первый.</div>';
-                updateScrollDownButton();
                 return;
             }
 
@@ -925,7 +921,6 @@ HTML_TEMPLATE = """
                 if (keepBottom) {
                     scrollToBottom(true);
                 }
-                updateScrollDownButton();
             });
         }
 
@@ -1148,7 +1143,7 @@ HTML_TEMPLATE = """
                     closeContextMenu();
                 }
             });
-            window.addEventListener("scroll", updateScrollDownButton, { passive: true });
+            scrollUpBtn.addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
             scrollDownBtn.addEventListener("click", () => scrollToBottom(true));
 
             await loadComments();
