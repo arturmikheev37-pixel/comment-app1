@@ -82,6 +82,12 @@ HTML = """
             max-width: 90%;
         }
         
+        .user-name {
+            font-size: 11px;
+            color: #0a84ff;
+            margin-top: 4px;
+        }
+        
         .messages-area {
             flex: 1;
             overflow-y: auto;
@@ -294,6 +300,7 @@ HTML = """
     <div class="chat-header">
         <div class="chat-title">💬 Комментарии</div>
         <div class="post-id" id="postIdDisplay"></div>
+        <div class="user-name" id="userNameDisplay"></div>
     </div>
     
     <div id="messagesContainer" class="messages-area">
@@ -317,59 +324,43 @@ HTML = """
     <div id="status" class="status"></div>
 
     <script>
-        // ========== ПОЛУЧАЕМ ID ПОСТА ==========
+        // ========== ПОЛУЧАЕМ ДАННЫЕ ИЗ URL (от бота) ==========
         const urlParams = new URLSearchParams(window.location.search);
-        let postId = urlParams.get('startapp') || urlParams.get('post') || 'general';
-        document.getElementById('postIdDisplay').innerHTML = postId.length > 50 ? postId.substring(0, 47) + '...' : postId;
+        let postId = urlParams.get('startapp');
+        let userId = urlParams.get('user_id');
+        let userName = urlParams.get('username');
         
-        // ========== ПОЛУЧАЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ ИЗ MAX ==========
-        let userId = null;
-        let userName = null;
-        
-        // Пытаемся получить из MAX WebApp
-        try {
-            if (window.Maxi && window.Maxi.initDataUnsafe && window.Maxi.initDataUnsafe.user) {
-                const user = window.Maxi.initDataUnsafe.user;
-                userId = user.id.toString();
-                userName = user.first_name + (user.last_name ? ' ' + user.last_name : '');
-                console.log('Данные из MAX:', userId, userName);
-            } else if (window.TelegramWebApp && window.TelegramWebApp.initDataUnsafe && window.TelegramWebApp.initDataUnsafe.user) {
-                const user = window.TelegramWebApp.initDataUnsafe.user;
-                userId = user.id.toString();
-                userName = user.first_name + (user.last_name ? ' ' + user.last_name : '');
-                console.log('Данные из Telegram:', userId, userName);
-            }
-        } catch(e) {
-            console.log('MAX API не доступен:', e);
+        // Если нет startapp — пробуем другие варианты
+        if (!postId) {
+            postId = urlParams.get('post') || 'general';
         }
         
-        // Если не получили из MAX, используем localStorage
-        if (!userId) {
+        // Отображаем ID поста
+        document.getElementById('postIdDisplay').innerHTML = postId.length > 50 ? postId.substring(0, 47) + '...' : postId;
+        
+        // ========== СОХРАНЯЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ ==========
+        if (userId && userName) {
+            // Используем данные от бота
+            console.log('Данные от бота:', userId, userName);
+            localStorage.setItem('comment_user_id', userId);
+            localStorage.setItem('comment_username', userName);
+            document.getElementById('userNameDisplay').innerHTML = `👤 ${userName}`;
+        } else {
+            // Fallback: берём из localStorage
             userId = localStorage.getItem('comment_user_id');
+            userName = localStorage.getItem('comment_username');
+            
             if (!userId) {
                 userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
                 localStorage.setItem('comment_user_id', userId);
             }
-        }
-        
-        if (!userName) {
-            userName = localStorage.getItem('comment_username');
+            
             if (!userName) {
-                // Пробуем получить имя из URL
-                const urlName = urlParams.get('username');
-                if (urlName) {
-                    userName = decodeURIComponent(urlName);
-                } else {
-                    userName = 'Гость';
-                }
+                userName = 'Гость';
                 localStorage.setItem('comment_username', userName);
             }
-        }
-        
-        // Если имя "Гость" и есть ID, можно сгенерировать красивое имя
-        if (userName === 'Гость' && userId) {
-            userName = 'Пользователь_' + userId.slice(-4);
-            localStorage.setItem('comment_username', userName);
+            
+            document.getElementById('userNameDisplay').innerHTML = `👤 ${userName} (локально)`;
         }
         
         console.log('Пользователь:', userId, userName);
