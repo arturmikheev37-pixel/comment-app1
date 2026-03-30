@@ -50,31 +50,27 @@ HTML = """
             flex-direction: column;
         }
         
+        /* Шапка */
         .chat-header {
             background: #1e1e22;
             padding: 12px 16px;
             border-bottom: 1px solid #2a2a2e;
-            display: flex;
-            align-items: center;
-            gap: 12px;
+            text-align: center;
             flex-shrink: 0;
         }
         
-        .back-btn {
-            background: none;
-            border: none;
-            color: #0a84ff;
-            font-size: 24px;
-            cursor: pointer;
-            padding: 0 8px;
-        }
-        
         .chat-title {
-            flex: 1;
             font-weight: 600;
-            font-size: 16px;
+            font-size: 17px;
         }
         
+        .post-id {
+            font-size: 10px;
+            color: #8e8e93;
+            margin-top: 4px;
+        }
+        
+        /* Область сообщений */
         .messages-area {
             flex: 1;
             overflow-y: auto;
@@ -84,10 +80,12 @@ HTML = """
             gap: 8px;
         }
         
+        /* Сообщение */
         .message {
             display: flex;
             gap: 10px;
             max-width: 100%;
+            animation: fadeIn 0.2s ease;
         }
         
         .message-avatar {
@@ -169,6 +167,7 @@ HTML = """
             color: #0a84ff;
         }
         
+        /* Ответы */
         .reply-toggle {
             font-size: 11px;
             color: #8e8e93;
@@ -184,12 +183,14 @@ HTML = """
             display: none;
         }
         
+        /* Пустое состояние */
         .empty-state {
             text-align: center;
             padding: 60px 20px;
             color: #8e8e93;
         }
         
+        /* Форма внизу */
         .input-bar {
             background: #1e1e22;
             border-top: 1px solid #2a2a2e;
@@ -276,25 +277,26 @@ HTML = """
             opacity: 1;
         }
         
-        .refresh-btn {
-            background: none;
-            border: none;
-            color: #0a84ff;
-            font-size: 14px;
-            cursor: pointer;
-            padding: 4px 8px;
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #8e8e93;
         }
     </style>
 </head>
 <body>
     <div class="chat-header">
-        <button class="back-btn" onclick="closeApp()">←</button>
         <div class="chat-title">💬 Комментарии</div>
-        <button class="refresh-btn" onclick="loadMessages()">🔄</button>
+        <div class="post-id" id="postIdDisplay"></div>
     </div>
     
     <div id="messagesContainer" class="messages-area">
-        <div class="empty-state">Загрузка...</div>
+        <div class="loading">Загрузка...</div>
     </div>
     
     <div id="replyIndicator" class="reply-indicator">
@@ -317,19 +319,48 @@ HTML = """
         // Получаем ID поста из URL
         const urlParams = new URLSearchParams(window.location.search);
         let postId = urlParams.get('startapp') || urlParams.get('post') || 'general';
+        document.getElementById('postIdDisplay').innerHTML = postId.length > 35 ? postId.substring(0, 35) + '...' : postId;
         
-        // ⭐ ПРОСТАЯ СХЕМА: имя пользователя через localStorage
-        let userId = localStorage.getItem('comment_user_id');
-        if (!userId) {
-            userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
-            localStorage.setItem('comment_user_id', userId);
+        // ⭐ ПОЛУЧАЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ ИЗ MAX (работает и на телефоне, и на компьютере)
+        let userId = null;
+        let userName = null;
+        
+        // Пытаемся получить данные из WebApp
+        try {
+            // Проверяем, открыто ли приложение в MAX
+            if (window.TelegramWebApp || window.Maxi || window.MAX) {
+                const webApp = window.TelegramWebApp || window.Maxi || window.MAX;
+                if (webApp.initDataUnsafe && webApp.initDataUnsafe.user) {
+                    const user = webApp.initDataUnsafe.user;
+                    userId = user.id.toString();
+                    userName = user.first_name + (user.last_name ? ' ' + user.last_name : '');
+                }
+            }
+        } catch(e) {
+            console.log('MAX API не доступен');
         }
         
-        let userName = localStorage.getItem('comment_username');
+        // Если не получили из MAX, используем localStorage
+        if (!userId) {
+            userId = localStorage.getItem('comment_user_id');
+            if (!userId) {
+                userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+                localStorage.setItem('comment_user_id', userId);
+            }
+        }
+        
         if (!userName) {
-            userName = prompt('Введите ваше имя:', 'Гость');
-            if (!userName) userName = 'Гость';
-            localStorage.setItem('comment_username', userName);
+            userName = localStorage.getItem('comment_username');
+            if (!userName) {
+                // Пробуем получить имя из URL параметра username
+                const urlName = urlParams.get('username');
+                if (urlName) {
+                    userName = urlName;
+                } else {
+                    userName = 'Гость';
+                }
+                localStorage.setItem('comment_username', userName);
+            }
         }
         
         let replyToId = null;
@@ -359,6 +390,7 @@ HTML = """
             return colors[Math.abs(hash) % colors.length];
         }
         
+        // Загрузка комментариев
         async function loadMessages() {
             try {
                 const response = await fetch(`/api/comments/${encodeURIComponent(postId)}`);
@@ -555,10 +587,6 @@ HTML = """
             loadMessages();
         }
         
-        function closeApp() {
-            if (window.Maxi && window.Maxi.close) window.Maxi.close();
-        }
-        
         function showStatus(msg, type) {
             const div = document.getElementById('status');
             div.textContent = msg;
@@ -572,7 +600,9 @@ HTML = """
             return div.innerHTML;
         }
         
+        // ⭐ АВТООБНОВЛЕНИЕ КОММЕНТАРИЕВ КАЖДЫЕ 3 СЕКУНДЫ
         loadMessages();
+        setInterval(loadMessages, 3000);
     </script>
 </body>
 </html>
