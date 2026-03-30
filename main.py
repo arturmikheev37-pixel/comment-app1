@@ -436,6 +436,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
         const webApp = window.WebApp || window.Maxi || null;
         const commentsList = document.getElementById("commentsList");
@@ -484,7 +485,12 @@ HTML_TEMPLATE = """
                 return String(appInstance.startParam).trim();
             }
             const params = new URLSearchParams(window.location.search);
-            return (params.get("startapp") || params.get("post_id") || "").trim();
+            return (
+                params.get("WebAppStartParam")
+                || params.get("startapp")
+                || params.get("post_id")
+                || ""
+            ).trim();
         }
 
         function getMaxUser(appInstance) {
@@ -502,6 +508,14 @@ HTML_TEMPLATE = """
                 user_id: userId,
                 username: username
             };
+        }
+
+        function getInitDataFallback(appInstance) {
+            if (appInstance && appInstance.initData) {
+                return String(appInstance.initData);
+            }
+            const params = new URLSearchParams(window.location.search);
+            return (params.get("WebAppData") || params.get("initData") || "").trim();
         }
 
         async function hydrateUserFromServer() {
@@ -635,7 +649,7 @@ HTML_TEMPLATE = """
                 appInstance.expand();
             }
 
-            initData = (appInstance && appInstance.initData) || "";
+            initData = getInitDataFallback(appInstance);
             postId = getStartParam(appInstance);
             currentUser = getMaxUser(appInstance);
             await hydrateUserFromServer();
