@@ -1,5 +1,7 @@
 flask
-gunicorn
-python-socketio
-eventlet
 flask-socketio
+eventlet
+python-socketio
+gunicorn
+aiohttp
+maxbot
