@@ -53,6 +53,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS posts (
             post_id TEXT PRIMARY KEY,
             source_post_id TEXT,
+            source_chat_id TEXT,
             button_message_id TEXT,
             counter_enabled INTEGER NOT NULL DEFAULT 1,
             post_text TEXT NOT NULL DEFAULT '',
@@ -116,6 +117,8 @@ def init_db():
     user_settings_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(user_settings)").fetchall()}
     if "source_post_id" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN source_post_id TEXT")
+    if "source_chat_id" not in post_columns:
+        cursor.execute("ALTER TABLE posts ADD COLUMN source_chat_id TEXT")
     if "button_message_id" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN button_message_id TEXT")
     if "counter_enabled" not in post_columns:
@@ -517,7 +520,7 @@ def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> d
 def get_post_info(post_id: str) -> dict | None:
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT post_id, source_post_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at FROM posts WHERE post_id = ?",
+        "SELECT post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at FROM posts WHERE post_id = ?",
         (post_id,),
     ).fetchone()
     conn.close()
@@ -526,6 +529,7 @@ def get_post_info(post_id: str) -> dict | None:
     return {
         "post_id": row["post_id"],
         "source_post_id": row["source_post_id"],
+        "source_chat_id": row["source_chat_id"],
         "button_message_id": row["button_message_id"],
         "counter_enabled": row["counter_enabled"],
         "post_text": row["post_text"],
@@ -595,6 +599,55 @@ def build_profile_url(public_username: str | None) -> str | None:
     if not username:
         return None
     return f"https://max.ru/{username}"
+
+
+def get_chat_admin_ids(chat_id: str) -> set[str]:
+    if not BOT_TOKEN or not chat_id:
+        return set()
+
+    urls = [
+        f"https://platform-api.max.ru/chats/{chat_id}/members/admins",
+        f"https://platform-api.max.ru/chats/{chat_id}",
+    ]
+    for url in urls:
+        try:
+            req = Request(
+                url=url,
+                headers={"Authorization": BOT_TOKEN},
+                method="GET",
+            )
+            with urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            admins: set[str] = set()
+            if isinstance(data, list):
+                for item in data:
+                    user = item.get("user") if isinstance(item, dict) else None
+                    candidate = (user or item or {}).get("user_id") or (user or item or {}).get("id")
+                    if candidate is not None:
+                        admins.add(str(candidate))
+            elif isinstance(data, dict):
+                members = data.get("members") or data.get("participants") or []
+                for item in members:
+                    role = str(item.get("role") or item.get("member_role") or "").lower()
+                    user = item.get("user") if isinstance(item, dict) else None
+                    candidate = (user or item or {}).get("user_id") or (user or item or {}).get("id")
+                    if candidate is not None and ("admin" in role or "owner" in role):
+                        admins.add(str(candidate))
+            if admins:
+                return admins
+        except Exception:
+            continue
+    return set()
+
+
+def user_can_moderate_comment(user_id: str, post_id: str) -> bool:
+    post = get_post_info(post_id)
+    if not post:
+        return False
+    source_chat_id = str(post.get("source_chat_id") or "").strip()
+    if not source_chat_id:
+        return False
+    return user_id in get_chat_admin_ids(source_chat_id)
 
 
 def send_reply_notification(target_user_id: str, actor_name: str, actor_comment: str, post_id: str):
@@ -2499,6 +2552,7 @@ def register_post():
     payload = request.get_json(silent=True) or {}
     post_id = normalize_post_id(payload.get("post_id"))
     source_post_id = str(payload.get("source_post_id") or "").strip()[:256]
+    source_chat_id = str(payload.get("source_chat_id") or "").strip()[:256]
     button_message_id = str(payload.get("button_message_id") or "").strip()[:256]
     counter_enabled = 1 if payload.get("counter_enabled", True) else 0
     post_text = (payload.get("post_text") or "").strip()[:4000]
@@ -2512,17 +2566,18 @@ def register_post():
     conn = get_db_connection()
     conn.execute(
         """
-        INSERT INTO posts (post_id, source_post_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(post_id) DO UPDATE SET
             source_post_id = excluded.source_post_id,
+            source_chat_id = excluded.source_chat_id,
             button_message_id = excluded.button_message_id,
             counter_enabled = excluded.counter_enabled,
             post_text = excluded.post_text,
             message_text = excluded.message_text,
             attachments_json = excluded.attachments_json
         """,
-        (post_id, source_post_id, button_message_id, counter_enabled, post_text, message_text, json.dumps(attachments_json, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
+        (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, json.dumps(attachments_json, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     conn.close()
@@ -2673,12 +2728,20 @@ def delete_comment(comment_id):
         return jsonify({"error": "Не передан user_id"}), 400
 
     conn = get_db_connection()
-    row = conn.execute("SELECT post_id, COALESCE(media_path, image_path) AS media_path FROM comments WHERE id = ? AND user_id = ?", (comment_id, user_id)).fetchone()
+    row = conn.execute(
+        "SELECT id, post_id, user_id, COALESCE(media_path, image_path) AS media_path FROM comments WHERE id = ?",
+        (comment_id,),
+    ).fetchone()
     if not row:
+        conn.close()
+        return jsonify({"error": "Комментарий не найден"}), 404
+    is_owner = row["user_id"] == user_id
+    is_admin = user_can_moderate_comment(user_id, row["post_id"])
+    if not is_owner and not is_admin:
         conn.close()
         return jsonify({"error": "Комментарий не найден или нет прав"}), 404
 
-    conn.execute("DELETE FROM comments WHERE id = ? AND user_id = ?", (comment_id, user_id))
+    conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
     conn.commit()
     conn.close()
 
