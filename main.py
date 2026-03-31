@@ -886,6 +886,68 @@ HTML_TEMPLATE = """
             gap: 8px;
         }
 
+        .consent-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 75;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            background: rgba(5, 10, 18, 0.92);
+            backdrop-filter: blur(10px);
+        }
+
+        .consent-modal.show {
+            display: flex;
+        }
+
+        .consent-card {
+            width: min(100%, 520px);
+            padding: 18px;
+            border-radius: 24px;
+            background: rgba(23, 33, 43, 0.98);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+        }
+
+        .consent-title {
+            font-size: 17px;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .consent-text {
+            font-size: 14px;
+            line-height: 1.5;
+            color: #d9e6f2;
+        }
+
+        .consent-actions {
+            margin-top: 14px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .consent-btn {
+            border: none;
+            border-radius: 14px;
+            padding: 10px 14px;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        .consent-btn.primary {
+            background: linear-gradient(135deg, #2ea6ff, #1b7fd0);
+            color: #fff;
+        }
+
+        .consent-btn.secondary {
+            background: rgba(255, 255, 255, 0.08);
+            color: #d8e6f3;
+        }
+
         .message-meta {
             margin-top: 6px;
             display: flex;
@@ -1209,12 +1271,23 @@ HTML_TEMPLATE = """
             </div>
         </div>
     </div>
+    <div class="consent-modal" id="consentModal" aria-hidden="true">
+        <div class="consent-card">
+            <div class="consent-title">Согласие на обработку данных</div>
+            <div class="consent-text">
+                Продолжая использовать комментарии, вы соглашаетесь на обработку имени профиля MAX, текста комментариев и прикреплённых медиа для работы этого сервиса комментариев.
+            </div>
+            <div class="consent-actions">
+                <button class="consent-btn secondary" id="consentDeclineBtn" type="button">Закрыть</button>
+                <button class="consent-btn primary" id="consentAcceptBtn" type="button">Согласен</button>
+            </div>
+        </div>
+    </div>
 
     <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
         const commentsList = document.getElementById("commentsList");
         const commentInput = document.getElementById("comment");
-        const charCount = document.getElementById("charCount");
         const status = document.getElementById("status");
         const submitBtn = document.getElementById("submitBtn");
         const attachBtn = document.getElementById("attachBtn");
@@ -1243,6 +1316,9 @@ HTML_TEMPLATE = """
         const resetEditorBtn = document.getElementById("resetEditorBtn");
         const applyEditorBtn = document.getElementById("applyEditorBtn");
         const closeEditorBtn = document.getElementById("closeEditorBtn");
+        const consentModal = document.getElementById("consentModal");
+        const consentAcceptBtn = document.getElementById("consentAcceptBtn");
+        const consentDeclineBtn = document.getElementById("consentDeclineBtn");
 
         let initData = "";
         let postId = "";
@@ -1278,6 +1354,39 @@ HTML_TEMPLATE = """
         function showStatus(message, type) {
             status.textContent = message;
             status.className = "status " + type;
+        }
+
+        function getConsentStorageKey() {
+            return `max-comments-consent:${postId || "global"}`;
+        }
+
+        function hasConsent() {
+            try {
+                return localStorage.getItem(getConsentStorageKey()) === "accepted";
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function openConsentModal() {
+            consentModal.classList.add("show");
+            consentModal.setAttribute("aria-hidden", "false");
+            document.body.style.overflow = "hidden";
+        }
+
+        function closeConsentModal() {
+            consentModal.classList.remove("show");
+            consentModal.setAttribute("aria-hidden", "true");
+            document.body.style.overflow = mediaViewer.classList.contains("show") || imageEditorModal.classList.contains("show") ? "hidden" : "";
+        }
+
+        function acceptConsent() {
+            try {
+                localStorage.setItem(getConsentStorageKey(), "accepted");
+            } catch (error) {
+                console.error(error);
+            }
+            closeConsentModal();
         }
 
         function revokePreviewObjectUrl() {
@@ -1596,7 +1705,6 @@ HTML_TEMPLATE = """
             replyToCommentId = null;
             selectedImage = null;
             commentInput.value = "";
-            charCount.textContent = "0";
             imageInput.value = "";
             imagePreview.classList.remove("show");
             revokePreviewObjectUrl();
@@ -1694,6 +1802,10 @@ HTML_TEMPLATE = """
 
         async function sendComment() {
             const comment = commentInput.value.trim();
+            if (!hasConsent()) {
+                openConsentModal();
+                return;
+            }
             if (!postId) {
                 showStatus("MAX не передал startapp", "error");
                 return;
@@ -1763,7 +1875,6 @@ HTML_TEMPLATE = """
             editingCommentId = commentId;
             replyToCommentId = null;
             commentInput.value = comment.comment || "";
-            charCount.textContent = commentInput.value.length;
             replyBox.classList.remove("show");
             commentInput.focus();
             showStatus("Редактирование комментария", "");
@@ -1861,7 +1972,6 @@ HTML_TEMPLATE = """
             await hydrateUserFromServer();
 
             commentInput.addEventListener("input", () => {
-                charCount.textContent = commentInput.value.length;
                 syncComposerSpace();
             });
             commentInput.addEventListener("keydown", (event) => {
@@ -1922,6 +2032,13 @@ HTML_TEMPLATE = """
             });
             applyEditorBtn.addEventListener("click", applyImageEditor);
             closeEditorBtn.addEventListener("click", closeImageEditor);
+            consentAcceptBtn.addEventListener("click", acceptConsent);
+            consentDeclineBtn.addEventListener("click", closeConsentModal);
+            consentModal.addEventListener("click", (event) => {
+                if (event.target === consentModal) {
+                    closeConsentModal();
+                }
+            });
             imageEditorModal.addEventListener("click", (event) => {
                 if (event.target === imageEditorModal) {
                     closeImageEditor();
@@ -1962,6 +2079,9 @@ HTML_TEMPLATE = """
 
             syncComposerSpace();
             await loadComments();
+            if (!hasConsent()) {
+                openConsentModal();
+            }
             setInterval(loadComments, 8000);
         }
 
