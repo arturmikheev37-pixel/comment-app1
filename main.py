@@ -915,7 +915,7 @@ HTML_TEMPLATE = """
             transform: translateX(-50%);
             width: min(760px, 100%);
             padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
-            background: linear-gradient(to top, rgba(14, 22, 33, 0.98), rgba(14, 22, 33, 0.74));
+            background: transparent;
         }
 
         .composer-card {
@@ -949,17 +949,18 @@ HTML_TEMPLATE = """
         textarea {
             width: 100%;
             min-height: 40px;
-            max-height: 96px;
+            height: 40px;
+            max-height: 120px;
             resize: none;
             background: rgba(34, 49, 64, 0.96);
             border: none;
             color: white;
             border-radius: 22px;
-            padding: 11px 16px;
+            padding: 10px 16px;
             outline: none;
             font: inherit;
             font-size: 14px;
-            line-height: 1.35;
+            line-height: 20px;
             box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
         }
 
