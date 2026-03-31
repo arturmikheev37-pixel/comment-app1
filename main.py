@@ -1230,10 +1230,10 @@ HTML_TEMPLATE = """
         }
 
         .preview {
-            margin-top: 8px;
+            margin: 0 0 8px;
             display: none;
             width: fit-content;
-            max-width: 160px;
+            max-width: 120px;
         }
 
         .preview.show {
@@ -1242,15 +1242,15 @@ HTML_TEMPLATE = """
 
         .preview img,
         .preview video {
-            max-width: 96px;
-            max-height: 96px;
+            max-width: 72px;
+            max-height: 72px;
             border-radius: 12px;
             display: block;
         }
 
         .preview-video-shell {
             margin-top: 0;
-            width: 96px;
+            width: 72px;
             aspect-ratio: 1 / 1;
             border-radius: 12px;
             overflow: hidden;
@@ -1261,10 +1261,23 @@ HTML_TEMPLATE = """
         }
 
         .preview-actions {
-            margin-top: 6px;
+            margin-top: 4px;
             display: flex;
             gap: 8px;
             flex-wrap: wrap;
+        }
+
+        .preview-actions .attach-btn {
+            width: auto;
+            height: auto;
+            border-radius: 12px;
+            padding: 6px 10px;
+            font-size: 12px;
+        }
+
+        .preview-actions .attach-btn svg {
+            width: 14px;
+            height: 14px;
         }
 
         .composer-actions {
@@ -1403,6 +1416,16 @@ HTML_TEMPLATE = """
     <div class="composer">
         <div class="composer-card">
             <div class="reply-box" id="replyBox"></div>
+            <div class="preview" id="imagePreview">
+                <img id="previewImage" alt="preview" hidden>
+                <div class="preview-video-shell" id="previewVideoShell" hidden>
+                    <video id="previewVideo" controls playsinline hidden></video>
+                </div>
+                <div class="preview-actions">
+                    <button class="attach-btn" id="editImageBtn" type="button" hidden>Редактор фото</button>
+                    <button class="attach-btn" id="removeImageBtn" type="button">Убрать вложение</button>
+                </div>
+            </div>
             <div class="composer-entry">
                 <div class="attachment-row">
                     <button class="attach-btn" id="attachBtn" type="button" aria-label="Прикрепить файл">
@@ -1419,16 +1442,6 @@ HTML_TEMPLATE = """
                         <path d="m21 3-7 18-4-7-7-4 18-7Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                     </svg>
                 </button>
-            </div>
-            <div class="preview" id="imagePreview">
-                <img id="previewImage" alt="preview" hidden>
-                <div class="preview-video-shell" id="previewVideoShell" hidden>
-                    <video id="previewVideo" controls playsinline hidden></video>
-                </div>
-                <div class="preview-actions">
-                    <button class="attach-btn" id="editImageBtn" type="button" hidden>Редактор фото</button>
-                    <button class="attach-btn" id="removeImageBtn" type="button">Убрать вложение</button>
-                </div>
             </div>
             <div class="composer-actions">
                 <div class="status" id="status"></div>
@@ -1904,15 +1917,19 @@ HTML_TEMPLATE = """
             }
         }
 
-        function setPreviewFromFile(file) {
+function setPreviewFromFile(file) {
             revokePreviewObjectUrl();
             if (!file) {
                 imagePreview.classList.remove("show");
                 previewImage.removeAttribute("src");
                 previewImage.hidden = true;
+                previewImage.style.display = "none";
                 previewVideoShell.hidden = true;
+                previewVideoShell.style.display = "none";
+                previewVideo.pause();
                 previewVideo.removeAttribute("src");
                 previewVideo.hidden = true;
+                previewVideo.style.display = "none";
                 previewVideo.load();
                 editImageBtn.hidden = true;
                 return;
@@ -1920,10 +1937,13 @@ HTML_TEMPLATE = """
             const isVideo = (file.type || "").startsWith("video/");
             previewImage.removeAttribute("src");
             previewImage.hidden = isVideo;
+            previewImage.style.display = isVideo ? "none" : "block";
             previewVideoShell.hidden = !isVideo;
+            previewVideoShell.style.display = isVideo ? "flex" : "none";
             previewVideo.pause();
             previewVideo.removeAttribute("src");
             previewVideo.hidden = !isVideo;
+            previewVideo.style.display = isVideo ? "block" : "none";
             editImageBtn.hidden = isVideo;
             if (isVideo) {
                 currentPreviewObjectUrl = URL.createObjectURL(file);
@@ -1950,9 +1970,13 @@ HTML_TEMPLATE = """
             revokePreviewObjectUrl();
             previewImage.removeAttribute("src");
             previewImage.hidden = true;
+            previewImage.style.display = "none";
             previewVideoShell.hidden = true;
+            previewVideoShell.style.display = "none";
+            previewVideo.pause();
             previewVideo.removeAttribute("src");
             previewVideo.hidden = true;
+            previewVideo.style.display = "none";
             previewVideo.load();
             editImageBtn.hidden = true;
             replyBox.classList.remove("show");
