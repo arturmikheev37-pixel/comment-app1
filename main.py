@@ -688,6 +688,8 @@ HTML_TEMPLATE = """
         * {
             box-sizing: border-box;
             -webkit-tap-highlight-color: transparent;
+            -webkit-user-select: none;
+            user-select: none;
         }
 
         html, body {
@@ -911,20 +913,22 @@ HTML_TEMPLATE = """
         .message-video-shell {
             margin-top: 8px;
             width: min(100%, 180px);
-            aspect-ratio: 9 / 14;
+            aspect-ratio: 4 / 5;
             border-radius: 14px;
             overflow: hidden;
             background: #0a0f15;
             display: flex;
             align-items: center;
             justify-content: center;
+            position: relative;
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
         }
 
         .message-video {
             width: 100%;
             height: 100%;
             background: #000;
-            object-fit: contain;
+            object-fit: cover;
         }
 
         .media-link {
@@ -1190,6 +1194,8 @@ HTML_TEMPLATE = """
             font-size: 14px;
             line-height: 20px;
             box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
+            -webkit-user-select: text;
+            user-select: text;
         }
 
         textarea:focus {
@@ -1932,6 +1938,7 @@ function setPreviewFromFile(file) {
                 previewVideo.style.display = "none";
                 previewVideo.load();
                 editImageBtn.hidden = true;
+                editImageBtn.style.display = "none";
                 return;
             }
             const isVideo = (file.type || "").startsWith("video/");
@@ -1945,6 +1952,7 @@ function setPreviewFromFile(file) {
             previewVideo.hidden = !isVideo;
             previewVideo.style.display = isVideo ? "block" : "none";
             editImageBtn.hidden = isVideo;
+            editImageBtn.style.display = isVideo ? "none" : "inline-flex";
             if (isVideo) {
                 currentPreviewObjectUrl = URL.createObjectURL(file);
                 previewVideo.src = currentPreviewObjectUrl;
@@ -1979,6 +1987,7 @@ function setPreviewFromFile(file) {
             previewVideo.style.display = "none";
             previewVideo.load();
             editImageBtn.hidden = true;
+            editImageBtn.style.display = "none";
             replyBox.classList.remove("show");
             replyBox.textContent = "";
             syncComposerSpace();
