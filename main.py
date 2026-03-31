@@ -741,9 +741,24 @@ HTML_TEMPLATE = """
             cursor: zoom-in;
         }
 
+        .message-video-shell,
+        .preview-video-shell {
+            margin-top: 8px;
+            width: min(100%, 180px);
+            aspect-ratio: 9 / 14;
+            border-radius: 14px;
+            overflow: hidden;
+            background: #0a0f15;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
         .message-video {
-            width: min(100%, 200px);
+            width: 100%;
+            height: 100%;
             background: #000;
+            object-fit: contain;
         }
 
         .media-link {
@@ -814,6 +829,61 @@ HTML_TEMPLATE = """
 
         .media-viewer-close:hover {
             background: rgba(255, 255, 255, 0.18);
+        }
+
+        .editor-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 70;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            background: rgba(5, 10, 18, 0.92);
+            backdrop-filter: blur(10px);
+        }
+
+        .editor-modal.show {
+            display: flex;
+        }
+
+        .editor-card {
+            width: min(100%, 860px);
+            max-height: 92vh;
+            overflow: auto;
+            padding: 14px;
+            border-radius: 24px;
+            background: rgba(23, 33, 43, 0.98);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+        }
+
+        .editor-title {
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .editor-canvas-wrap {
+            border-radius: 18px;
+            overflow: hidden;
+            background: #0a0f15;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .editor-canvas {
+            display: block;
+            width: 100%;
+            max-height: 62vh;
+            touch-action: none;
+            background: #0a0f15;
+        }
+
+        .editor-actions {
+            margin-top: 12px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
         }
 
         .message-meta {
@@ -923,6 +993,13 @@ HTML_TEMPLATE = """
             max-height: 120px;
             border-radius: 12px;
             display: block;
+        }
+
+        .preview-video-shell {
+            margin-top: 0;
+            width: 128px;
+            aspect-ratio: 9 / 14;
+            border-radius: 12px;
         }
 
         .preview-actions {
@@ -1054,8 +1131,11 @@ HTML_TEMPLATE = """
             </div>
             <div class="preview" id="imagePreview">
                 <img id="previewImage" alt="preview" hidden>
-                <video id="previewVideo" controls playsinline hidden></video>
+                <div class="preview-video-shell" id="previewVideoShell" hidden>
+                    <video id="previewVideo" controls playsinline hidden></video>
+                </div>
                 <div class="preview-actions">
+                    <button class="attach-btn" id="editImageBtn" type="button" hidden>Редактор фото</button>
                     <button class="attach-btn" id="removeImageBtn" type="button">Убрать вложение</button>
                 </div>
             </div>
@@ -1077,6 +1157,21 @@ HTML_TEMPLATE = """
             <video class="media-viewer-video" id="mediaViewerVideo" controls playsinline hidden></video>
         </div>
     </div>
+    <div class="editor-modal" id="imageEditorModal" aria-hidden="true">
+        <div class="editor-card" id="imageEditorCard">
+            <div class="editor-title">Редактор фото</div>
+            <div class="editor-canvas-wrap">
+                <canvas class="editor-canvas" id="imageEditorCanvas"></canvas>
+            </div>
+            <div class="editor-actions">
+                <button class="attach-btn" id="cropSquareBtn" type="button">Обрезать 1:1</button>
+                <button class="attach-btn" id="toggleDrawBtn" type="button">Рисование: выкл</button>
+                <button class="attach-btn" id="resetEditorBtn" type="button">Сброс</button>
+                <button class="attach-btn" id="applyEditorBtn" type="button">Готово</button>
+                <button class="attach-btn" id="closeEditorBtn" type="button">Закрыть</button>
+            </div>
+        </div>
+    </div>
 
     <script src="https://st.max.ru/js/max-web-app.js"></script>
     <script>
@@ -1090,7 +1185,9 @@ HTML_TEMPLATE = """
         const imagePreview = document.getElementById("imagePreview");
         const previewImage = document.getElementById("previewImage");
         const previewVideo = document.getElementById("previewVideo");
+        const previewVideoShell = document.getElementById("previewVideoShell");
         const removeImageBtn = document.getElementById("removeImageBtn");
+        const editImageBtn = document.getElementById("editImageBtn");
         const postCard = document.getElementById("postCard");
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
@@ -1101,6 +1198,14 @@ HTML_TEMPLATE = """
         const mediaViewerImage = document.getElementById("mediaViewerImage");
         const mediaViewerVideo = document.getElementById("mediaViewerVideo");
         const mediaViewerClose = document.getElementById("mediaViewerClose");
+        const imageEditorModal = document.getElementById("imageEditorModal");
+        const imageEditorCard = document.getElementById("imageEditorCard");
+        const imageEditorCanvas = document.getElementById("imageEditorCanvas");
+        const cropSquareBtn = document.getElementById("cropSquareBtn");
+        const toggleDrawBtn = document.getElementById("toggleDrawBtn");
+        const resetEditorBtn = document.getElementById("resetEditorBtn");
+        const applyEditorBtn = document.getElementById("applyEditorBtn");
+        const closeEditorBtn = document.getElementById("closeEditorBtn");
 
         let initData = "";
         let postId = "";
@@ -1112,6 +1217,11 @@ HTML_TEMPLATE = """
         let menuCommentId = null;
         let longPressTimer = null;
         let currentPreviewObjectUrl = null;
+        let editorImage = null;
+        let editorBaseDataUrl = "";
+        let editorDrawingEnabled = false;
+        let editorIsDrawing = false;
+        let editorLastPoint = null;
         const allowedImageTypes = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"]);
         const allowedVideoTypes = new Set(["video/mp4", "video/quicktime", "video/webm", "video/x-m4v"]);
         const allowedExtensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".webm", ".m4v"];
@@ -1190,6 +1300,106 @@ HTML_TEMPLATE = """
             }
             const safeName = (file.name || "photo").replace(/\\.[^.]+$/, "") + ".jpg";
             return new File([blob], safeName, { type: "image/jpeg", lastModified: Date.now() });
+        }
+
+        function drawEditorImage() {
+            if (!editorImage) return;
+            const ratio = editorImage.height / editorImage.width;
+            imageEditorCanvas.width = Math.max(1, editorImage.width);
+            imageEditorCanvas.height = Math.max(1, editorImage.height);
+            imageEditorCanvas.style.aspectRatio = `${editorImage.width} / ${editorImage.height}`;
+            const context = imageEditorCanvas.getContext("2d");
+            context.clearRect(0, 0, imageEditorCanvas.width, imageEditorCanvas.height);
+            context.drawImage(editorImage, 0, 0, imageEditorCanvas.width, imageEditorCanvas.height);
+        }
+
+        function openImageEditor() {
+            if (!selectedImage || !(selectedImage.type || "").startsWith("image/")) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                editorBaseDataUrl = reader.result;
+                editorImage = new Image();
+                editorImage.onload = () => {
+                    drawEditorImage();
+                    imageEditorModal.classList.add("show");
+                    imageEditorModal.setAttribute("aria-hidden", "false");
+                    document.body.style.overflow = "hidden";
+                };
+                editorImage.src = editorBaseDataUrl;
+            };
+            reader.readAsDataURL(selectedImage);
+        }
+
+        function closeImageEditor() {
+            imageEditorModal.classList.remove("show");
+            imageEditorModal.setAttribute("aria-hidden", "true");
+            editorIsDrawing = false;
+            editorLastPoint = null;
+            editorDrawingEnabled = false;
+            toggleDrawBtn.textContent = "Рисование: выкл";
+            document.body.style.overflow = mediaViewer.classList.contains("show") ? "hidden" : "";
+        }
+
+        function getCanvasPoint(event) {
+            const rect = imageEditorCanvas.getBoundingClientRect();
+            const source = event.touches && event.touches[0] ? event.touches[0] : event;
+            const x = ((source.clientX - rect.left) / rect.width) * imageEditorCanvas.width;
+            const y = ((source.clientY - rect.top) / rect.height) * imageEditorCanvas.height;
+            return { x, y };
+        }
+
+        function startCanvasDraw(event) {
+            if (!editorDrawingEnabled) return;
+            editorIsDrawing = true;
+            editorLastPoint = getCanvasPoint(event);
+            event.preventDefault();
+        }
+
+        function moveCanvasDraw(event) {
+            if (!editorDrawingEnabled || !editorIsDrawing || !editorLastPoint) return;
+            const point = getCanvasPoint(event);
+            const context = imageEditorCanvas.getContext("2d");
+            context.strokeStyle = "#ff4d4f";
+            context.lineWidth = Math.max(4, imageEditorCanvas.width / 120);
+            context.lineCap = "round";
+            context.lineJoin = "round";
+            context.beginPath();
+            context.moveTo(editorLastPoint.x, editorLastPoint.y);
+            context.lineTo(point.x, point.y);
+            context.stroke();
+            editorLastPoint = point;
+            event.preventDefault();
+        }
+
+        function stopCanvasDraw() {
+            editorIsDrawing = false;
+            editorLastPoint = null;
+        }
+
+        function cropEditorToSquare() {
+            if (!editorImage) return;
+            const context = imageEditorCanvas.getContext("2d");
+            const side = Math.min(imageEditorCanvas.width, imageEditorCanvas.height);
+            const x = Math.floor((imageEditorCanvas.width - side) / 2);
+            const y = Math.floor((imageEditorCanvas.height - side) / 2);
+            const cropped = document.createElement("canvas");
+            cropped.width = side;
+            cropped.height = side;
+            cropped.getContext("2d").drawImage(imageEditorCanvas, x, y, side, side, 0, 0, side, side);
+            editorBaseDataUrl = cropped.toDataURL("image/jpeg", 0.9);
+            editorImage = new Image();
+            editorImage.onload = drawEditorImage;
+            editorImage.src = editorBaseDataUrl;
+        }
+
+        async function applyImageEditor() {
+            const blob = await new Promise((resolve) => imageEditorCanvas.toBlob(resolve, "image/jpeg", 0.82));
+            if (!blob) return;
+            const safeName = ((selectedImage && selectedImage.name) || "photo").replace(/\\.[^.]+$/, "") + ".jpg";
+            selectedImage = new File([blob], safeName, { type: "image/jpeg", lastModified: Date.now() });
+            setPreviewFromFile(selectedImage);
+            closeImageEditor();
+            showStatus("Фото обновлено", "success");
         }
 
         function syncComposerSpace() {
@@ -1317,14 +1527,18 @@ HTML_TEMPLATE = """
                 imagePreview.classList.remove("show");
                 previewImage.removeAttribute("src");
                 previewImage.hidden = true;
+                previewVideoShell.hidden = true;
                 previewVideo.removeAttribute("src");
                 previewVideo.hidden = true;
                 previewVideo.load();
+                editImageBtn.hidden = true;
                 return;
             }
             const isVideo = (file.type || "").startsWith("video/");
             previewImage.hidden = isVideo;
+            previewVideoShell.hidden = !isVideo;
             previewVideo.hidden = !isVideo;
+            editImageBtn.hidden = isVideo;
             if (isVideo) {
                 currentPreviewObjectUrl = URL.createObjectURL(file);
                 previewVideo.src = currentPreviewObjectUrl;
@@ -1351,9 +1565,11 @@ HTML_TEMPLATE = """
             revokePreviewObjectUrl();
             previewImage.removeAttribute("src");
             previewImage.hidden = true;
+            previewVideoShell.hidden = true;
             previewVideo.removeAttribute("src");
             previewVideo.hidden = true;
             previewVideo.load();
+            editImageBtn.hidden = true;
             submitBtn.textContent = "Отправить";
             replyBox.classList.remove("show");
             replyBox.textContent = "";
@@ -1367,7 +1583,7 @@ HTML_TEMPLATE = """
             const normalizedMediaType = normalizeMediaType(comment.media_type, mediaUrl);
             const mediaHtml = comment.image_url
                 ? (normalizedMediaType === "video"
-                    ? `<video class="message-video" src="${mediaUrl}" controls playsinline preload="none"></video><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'video'); return false;">Открыть видео</a>`
+                    ? `<div class="message-video-shell"><video class="message-video" src="${mediaUrl}" controls playsinline preload="none"></video></div><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'video'); return false;">Открыть видео</a>`
                     : `<img class="message-image" src="${mediaUrl}" alt="comment media" loading="lazy" onclick="openMediaViewer('${mediaUrl}', 'image')"><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'image'); return false;">Открыть фото</a>`)
                 : "";
             const editedHtml = comment.edited_at ? '<span>изменено</span>' : "";
@@ -1622,6 +1838,7 @@ HTML_TEMPLATE = """
             });
             submitBtn.addEventListener("click", sendComment);
             attachBtn.addEventListener("click", () => imageInput.click());
+            editImageBtn.addEventListener("click", openImageEditor);
             imageInput.addEventListener("change", async () => {
                 const pickedFile = imageInput.files && imageInput.files[0] ? imageInput.files[0] : null;
                 if (!pickedFile) {
@@ -1658,6 +1875,33 @@ HTML_TEMPLATE = """
                 setPreviewFromFile(null);
                 syncComposerSpace();
             });
+            cropSquareBtn.addEventListener("click", cropEditorToSquare);
+            toggleDrawBtn.addEventListener("click", () => {
+                editorDrawingEnabled = !editorDrawingEnabled;
+                toggleDrawBtn.textContent = `Рисование: ${editorDrawingEnabled ? "вкл" : "выкл"}`;
+            });
+            resetEditorBtn.addEventListener("click", () => {
+                if (!editorBaseDataUrl) return;
+                editorImage = new Image();
+                editorImage.onload = drawEditorImage;
+                editorImage.src = editorBaseDataUrl;
+            });
+            applyEditorBtn.addEventListener("click", applyImageEditor);
+            closeEditorBtn.addEventListener("click", closeImageEditor);
+            imageEditorModal.addEventListener("click", (event) => {
+                if (event.target === imageEditorModal) {
+                    closeImageEditor();
+                }
+            });
+            imageEditorCard.addEventListener("click", (event) => event.stopPropagation());
+            imageEditorCanvas.addEventListener("mousedown", startCanvasDraw);
+            imageEditorCanvas.addEventListener("mousemove", moveCanvasDraw);
+            imageEditorCanvas.addEventListener("mouseup", stopCanvasDraw);
+            imageEditorCanvas.addEventListener("mouseleave", stopCanvasDraw);
+            imageEditorCanvas.addEventListener("touchstart", startCanvasDraw, { passive: false });
+            imageEditorCanvas.addEventListener("touchmove", moveCanvasDraw, { passive: false });
+            imageEditorCanvas.addEventListener("touchend", stopCanvasDraw);
+            imageEditorCanvas.addEventListener("touchcancel", stopCanvasDraw);
             document.addEventListener("click", (event) => {
                 if (!contextMenu.contains(event.target)) {
                     closeContextMenu();
@@ -1675,6 +1919,9 @@ HTML_TEMPLATE = """
             document.addEventListener("keydown", (event) => {
                 if (event.key === "Escape" && mediaViewer.classList.contains("show")) {
                     closeMediaViewer();
+                }
+                if (event.key === "Escape" && imageEditorModal.classList.contains("show")) {
+                    closeImageEditor();
                 }
             });
             window.addEventListener("resize", syncComposerSpace);
