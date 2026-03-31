@@ -2412,13 +2412,13 @@ def get_comments_by_post(post_id):
     conn = get_db_connection()
     rows = conn.execute(
         """
-        SELECT id, post_id, user_id, username, comment, image_path, media_path, media_type, parent_id, edited_at, created_at
+        SELECT comments.id, comments.post_id, comments.user_id, comments.username, comments.comment, comments.image_path, comments.media_path, comments.media_type, comments.parent_id, comments.edited_at, comments.created_at
         , COALESCE(comments.public_username, user_settings.public_username) AS public_username
         , COALESCE(comments.avatar_url, user_settings.avatar_url) AS avatar_url
         FROM comments
         LEFT JOIN user_settings ON user_settings.user_id = comments.user_id
-        WHERE post_id = ?
-        ORDER BY created_at DESC
+        WHERE comments.post_id = ?
+        ORDER BY comments.created_at DESC
         """,
         (normalized_post_id,),
     ).fetchall()
