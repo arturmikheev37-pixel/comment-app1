@@ -919,11 +919,11 @@ HTML_TEMPLATE = """
         }
 
         .composer-card {
-            background: rgba(23, 33, 43, 0.96);
-            border: 1px solid var(--tg-panel-border);
-            border-radius: 22px;
-            padding: 8px;
-            box-shadow: 0 12px 34px rgba(0, 0, 0, 0.28);
+            background: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            box-shadow: none;
         }
 
         .reply-box {
@@ -943,7 +943,7 @@ HTML_TEMPLATE = """
         .composer-entry {
             display: flex;
             align-items: flex-end;
-            gap: 8px;
+            gap: 10px;
         }
 
         textarea {
@@ -951,19 +951,20 @@ HTML_TEMPLATE = """
             min-height: 40px;
             max-height: 96px;
             resize: none;
-            background: #223140;
-            border: 1px solid transparent;
+            background: rgba(34, 49, 64, 0.96);
+            border: none;
             color: white;
-            border-radius: 18px;
-            padding: 10px 14px;
+            border-radius: 22px;
+            padding: 11px 16px;
             outline: none;
             font: inherit;
             font-size: 14px;
             line-height: 1.35;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
         }
 
         textarea:focus {
-            border-color: rgba(46, 166, 255, 0.7);
+            box-shadow: 0 0 0 1px rgba(46, 166, 255, 0.22), 0 10px 24px rgba(0, 0, 0, 0.22);
         }
 
         .attachment-row {
@@ -975,17 +976,28 @@ HTML_TEMPLATE = """
 
         .attach-btn {
             border: none;
-            background: #223140;
-            color: #d7e9ff;
+            background: rgba(34, 49, 64, 0.96);
+            color: #cfe4f8;
             border-radius: 50%;
-            width: 42px;
-            height: 42px;
+            width: 40px;
+            height: 40px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            font-size: 20px;
             cursor: pointer;
             flex-shrink: 0;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+            padding: 0;
+        }
+
+        .attach-btn svg {
+            width: 18px;
+            height: 18px;
+            display: block;
+        }
+
+        .attach-btn:hover {
+            background: rgba(42, 61, 79, 0.98);
         }
 
         .preview {
@@ -1042,17 +1054,24 @@ HTML_TEMPLATE = """
 
         .send-btn {
             border: none;
-            background: var(--tg-accent);
+            background: linear-gradient(135deg, #2ea6ff, #1b7fd0);
             color: white;
             border-radius: 50%;
-            width: 42px;
-            height: 42px;
+            width: 40px;
+            height: 40px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            font-size: 18px;
             cursor: pointer;
             flex-shrink: 0;
+            box-shadow: 0 10px 24px rgba(24, 126, 208, 0.32);
+            padding: 0;
+        }
+
+        .send-btn svg {
+            width: 17px;
+            height: 17px;
+            display: block;
         }
 
         .send-btn:disabled {
@@ -1136,11 +1155,20 @@ HTML_TEMPLATE = """
             <div class="reply-box" id="replyBox"></div>
             <div class="composer-entry">
                 <div class="attachment-row">
-                    <button class="attach-btn" id="attachBtn" type="button" aria-label="Прикрепить файл">📎</button>
+                    <button class="attach-btn" id="attachBtn" type="button" aria-label="Прикрепить файл">
+                        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <path d="M9.5 12.5 16 6a3.5 3.5 0 1 1 5 5l-9 9a5.5 5.5 0 1 1-7.8-7.8l8.3-8.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
                     <input id="imageInput" type="file" accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.mp4,.mov,.webm,.m4v,image/jpeg,image/png,image/gif,image/webp,image/bmp,video/mp4,video/quicktime,video/webm,video/x-m4v" hidden>
                 </div>
                 <textarea id="comment" maxlength="1000" placeholder="Сообщение"></textarea>
-                <button id="submitBtn" class="send-btn" type="button" aria-label="Отправить">➤</button>
+                <button id="submitBtn" class="send-btn" type="button" aria-label="Отправить">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M21 3 10 14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="m21 3-7 18-4-7-7-4 18-7Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
             </div>
             <div class="preview" id="imagePreview">
                 <img id="previewImage" alt="preview" hidden>
