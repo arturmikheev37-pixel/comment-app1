@@ -16,12 +16,18 @@ from werkzeug.utils import secure_filename
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(__file__)
-DB_PATH = os.path.join(BASE_DIR, "comments.db")
-STORE_DB_PATH = os.getenv("COMMENTS_STORE_DB", os.path.join(BASE_DIR, "comment_store.db"))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-BACKUP_DIR = os.getenv("COMMENTS_BACKUP_DIR", os.path.join(BASE_DIR, "backups"))
+DATA_DIR = os.getenv("COMMENTS_DATA_DIR", os.path.join(os.path.expanduser("~"), "MAXCommentBotData"))
+LEGACY_DB_PATH = os.path.join(BASE_DIR, "comments.db")
+LEGACY_STORE_DB_PATH = os.path.join(BASE_DIR, "comment_store.db")
+LEGACY_UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+LEGACY_BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+LEGACY_STORE_ARCHIVE_PATH = os.path.join(BASE_DIR, "comment_store.zip")
+DB_PATH = os.path.join(DATA_DIR, "comments.db")
+STORE_DB_PATH = os.getenv("COMMENTS_STORE_DB", os.path.join(DATA_DIR, "comment_store.db"))
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+BACKUP_DIR = os.getenv("COMMENTS_BACKUP_DIR", os.path.join(DATA_DIR, "backups"))
 BACKUP_RETENTION = max(3, int(os.getenv("COMMENTS_BACKUP_RETENTION", "20")))
-STORE_ARCHIVE_PATH = os.getenv("COMMENTS_STORE_ARCHIVE", os.path.join(BASE_DIR, "comment_store.zip"))
+STORE_ARCHIVE_PATH = os.getenv("COMMENTS_STORE_ARCHIVE", os.path.join(DATA_DIR, "comment_store.zip"))
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "f9LHodD0cOIdrNPjh3CWiZlW8bj-DhNpjF6VBTWDQP66-wijDIChpbtLyNZeZOtubmx3thZhMxQe7j8oXnCq").strip()
 BOT_USERNAME = os.getenv("MAX_BOT_USERNAME", "id250300578953_1_bot").strip()
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -43,7 +49,55 @@ def get_db_connection():
     return conn
 
 
+def migrate_legacy_storage():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    migrations = [
+        (LEGACY_DB_PATH, DB_PATH),
+        (LEGACY_STORE_DB_PATH, STORE_DB_PATH),
+        (LEGACY_STORE_ARCHIVE_PATH, STORE_ARCHIVE_PATH),
+    ]
+    for source, target in migrations:
+        if os.path.exists(source) and not os.path.exists(target):
+            try:
+                os.replace(source, target)
+            except OSError:
+                pass
+
+    if os.path.isdir(LEGACY_UPLOAD_DIR) and not os.path.isdir(UPLOAD_DIR):
+        try:
+            os.replace(LEGACY_UPLOAD_DIR, UPLOAD_DIR)
+        except OSError:
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            for root, _, files in os.walk(LEGACY_UPLOAD_DIR):
+                rel_root = os.path.relpath(root, LEGACY_UPLOAD_DIR)
+                target_root = UPLOAD_DIR if rel_root == "." else os.path.join(UPLOAD_DIR, rel_root)
+                os.makedirs(target_root, exist_ok=True)
+                for file_name in files:
+                    source_file = os.path.join(root, file_name)
+                    target_file = os.path.join(target_root, file_name)
+                    if not os.path.exists(target_file):
+                        try:
+                            os.replace(source_file, target_file)
+                        except OSError:
+                            pass
+
+    if os.path.isdir(LEGACY_BACKUP_DIR) and not os.path.isdir(BACKUP_DIR):
+        try:
+            os.replace(LEGACY_BACKUP_DIR, BACKUP_DIR)
+        except OSError:
+            os.makedirs(BACKUP_DIR, exist_ok=True)
+            for file_name in os.listdir(LEGACY_BACKUP_DIR):
+                source_file = os.path.join(LEGACY_BACKUP_DIR, file_name)
+                target_file = os.path.join(BACKUP_DIR, file_name)
+                if os.path.isfile(source_file) and not os.path.exists(target_file):
+                    try:
+                        os.replace(source_file, target_file)
+                    except OSError:
+                        pass
+
+
 def init_db():
+    os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     os.makedirs(BACKUP_DIR, exist_ok=True)
     conn = get_db_connection()
