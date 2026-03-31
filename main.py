@@ -514,6 +514,8 @@ def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> d
         "parent_preview": parent_preview,
         "edited_at": row["edited_at"],
         "created_at": row["created_at"],
+        "can_edit": False,
+        "can_delete": False,
     }
 
 
@@ -1740,7 +1742,9 @@ HTML_TEMPLATE = """
                 comment.image_url || "",
                 comment.media_type || "",
                 comment.avatar_url || "",
-                comment.public_username || ""
+                comment.public_username || "",
+                comment.can_edit ? "1" : "0",
+                comment.can_delete ? "1" : "0"
             ].join("|")).join("::");
         }
 
@@ -2348,12 +2352,13 @@ function setPreviewFromFile(file) {
         function openContextMenu(commentId, targetElement) {
             const comment = latestComments.find((item) => item.id === commentId);
             if (!comment) return;
-            const isMine = currentUser && comment.user_id === currentUser.user_id;
+            const canEdit = Boolean(comment.can_edit);
+            const canDelete = Boolean(comment.can_delete);
             menuCommentId = commentId;
             contextMenu.innerHTML = `
                 <button type="button" onclick="menuReply()">Ответить</button>
-                ${isMine ? '<button type="button" onclick="menuEdit()">Редактировать</button>' : ''}
-                ${isMine ? '<button type="button" onclick="menuDelete()">Удалить</button>' : ''}
+                ${canEdit ? '<button type="button" onclick="menuEdit()">Редактировать</button>' : ''}
+                ${canDelete ? '<button type="button" onclick="menuDelete()">Удалить</button>' : ''}
             `;
             const rect = targetElement.getBoundingClientRect();
             const left = Math.min(window.innerWidth - 220, Math.max(8, rect.left));
@@ -2654,7 +2659,11 @@ def register_post():
 def get_comments_by_post(post_id):
     normalized_post_id = normalize_post_id(post_id)
     if not normalized_post_id:
-        return jsonify({"error": "Не передан post_id"}), 400
+        return jsonify({"error": "?? ??????? post_id"}), 400
+
+    verified_user = validate_max_init_data((request.args.get("init_data") or "").strip())
+    viewer_id = str((verified_user or {}).get("user_id") or "").strip()
+    viewer_is_admin = user_can_moderate_comment(viewer_id, normalized_post_id) if viewer_id else False
 
     conn = get_db_connection()
     rows = conn.execute(
@@ -2672,7 +2681,13 @@ def get_comments_by_post(post_id):
     conn.close()
 
     row_lookup = {row["id"]: row for row in rows}
-    comments = [serialize_comment(row, row_lookup) for row in rows]
+    comments = []
+    for row in rows:
+        comment = serialize_comment(row, row_lookup)
+        is_owner = bool(viewer_id and str(row["user_id"]) == viewer_id)
+        comment["can_edit"] = is_owner
+        comment["can_delete"] = is_owner or viewer_is_admin
+        comments.append(comment)
     return jsonify({"post_id": normalized_post_id, "post": get_post_info(normalized_post_id), "comments": comments})
 
 
