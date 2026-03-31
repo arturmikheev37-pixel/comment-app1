@@ -69,6 +69,7 @@ def init_db():
             post_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             username TEXT NOT NULL,
+            public_username TEXT,
             comment TEXT NOT NULL DEFAULT '',
             image_path TEXT,
             media_path TEXT,
@@ -79,10 +80,24 @@ def init_db():
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL DEFAULT '',
+            public_username TEXT,
+            notifications_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
 
     comment_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(comments)").fetchall()}
     if "image_path" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN image_path TEXT")
+    if "public_username" not in comment_columns:
+        cursor.execute("ALTER TABLE comments ADD COLUMN public_username TEXT")
     if "media_path" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN media_path TEXT")
     if "media_type" not in comment_columns:
@@ -418,7 +433,12 @@ def parse_max_user(raw_user: str | dict | None) -> dict | None:
     user_id = str(user.get("user_id") or user.get("id") or "").strip()
     if not user_id:
         return None
-    return {"user_id": user_id[:128], "username": username[:50] or "Пользователь MAX"}
+    public_username = (user.get("username") or "").strip()
+    return {
+        "user_id": user_id[:128],
+        "username": username[:50] or "Пользователь MAX",
+        "public_username": public_username[:128],
+    }
 
 
 def validate_max_init_data(init_data: str) -> dict | None:
@@ -455,6 +475,7 @@ def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> d
         "post_id": row["post_id"],
         "user_id": row["user_id"],
         "username": row["username"],
+        "public_username": row["public_username"] if "public_username" in row.keys() else "",
         "comment": row["comment"],
         "image_url": build_file_url(media_path),
         "media_type": media_type,
@@ -484,6 +505,98 @@ def get_post_info(post_id: str) -> dict | None:
         "attachments_json": row["attachments_json"],
         "created_at": row["created_at"],
     }
+
+
+def upsert_user_settings(user: dict, notifications_enabled: int | None = None):
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    existing = conn.execute(
+        "SELECT notifications_enabled FROM user_settings WHERE user_id = ?",
+        (user["user_id"],),
+    ).fetchone()
+    effective_notifications = existing["notifications_enabled"] if existing and notifications_enabled is None else int(1 if notifications_enabled is None else notifications_enabled)
+    conn.execute(
+        """
+        INSERT INTO user_settings (user_id, username, public_username, notifications_enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username = excluded.username,
+            public_username = excluded.public_username,
+            notifications_enabled = excluded.notifications_enabled,
+            updated_at = excluded.updated_at
+        """,
+        (
+            user["user_id"],
+            user["username"],
+            user.get("public_username", ""),
+            effective_notifications,
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_settings(user_id: str) -> dict:
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT user_id, username, public_username, notifications_enabled FROM user_settings WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {"notifications_enabled": True}
+    return {
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "public_username": row["public_username"] or "",
+        "notifications_enabled": bool(row["notifications_enabled"]),
+    }
+
+
+def build_profile_url(public_username: str | None) -> str | None:
+    username = (public_username or "").strip()
+    if not username:
+        return None
+    return f"https://max.ru/{username}"
+
+
+def send_reply_notification(target_user_id: str, actor_name: str, actor_comment: str, post_id: str):
+    if not BOT_TOKEN or not target_user_id:
+        return
+    preview = (actor_comment or "").strip() or "Фото/видео"
+    text = f"Вам ответили в комментариях.\n\n{actor_name}: {preview[:300]}"
+    payload = {
+        "text": text,
+        "notify": True,
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {
+                    "buttons": [[
+                        {
+                            "type": "link",
+                            "text": "Открыть комментарии",
+                            "url": f"https://max.ru/{BOT_USERNAME}?startapp={post_id}",
+                        }
+                    ]]
+                }
+            }
+        ],
+    }
+
+    try:
+        req = Request(
+            url=f"https://botapi.max.ru/messages?access_token={BOT_TOKEN}&user_id={target_user_id}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=10) as response:
+            response.read()
+    except Exception as error:
+        print(f"Не удалось отправить уведомление пользователю {target_user_id[:32]}: {error}")
 
 
 def refresh_post_button(post_id: str):
@@ -608,6 +721,35 @@ HTML_TEMPLATE = """
             font-weight: 700;
         }
 
+        .topbar-inner {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .notify-toggle {
+            position: absolute;
+            right: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 38px;
+            height: 38px;
+            border: none;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.08);
+            color: #d7e7f6;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+
+        .notify-toggle.active {
+            color: #8fd3ff;
+            background: rgba(46, 166, 255, 0.16);
+        }
+
         .title-dot {
             width: 10px;
             height: 10px;
@@ -705,6 +847,7 @@ HTML_TEMPLATE = """
             font-size: 13px;
             font-weight: 700;
             margin-bottom: 4px;
+            cursor: pointer;
         }
 
         .reply-pill {
@@ -1180,6 +1323,12 @@ HTML_TEMPLATE = """
             transition: box-shadow 0.3s ease, outline-color 0.3s ease;
         }
 
+        .bubble.press-anim {
+            transform: scale(0.985);
+            filter: brightness(1.06);
+            transition: transform 0.14s ease, filter 0.14s ease;
+        }
+
         @media (max-width: 640px) {
             .feed {
                 padding-left: 8px;
@@ -1200,9 +1349,17 @@ HTML_TEMPLATE = """
 <body>
     <div class="app">
         <header class="topbar">
-            <div class="title">
-                <span class="title-dot"></span>
-                <span>Комментарии</span>
+            <div class="topbar-inner">
+                <div class="title">
+                    <span class="title-dot"></span>
+                    <span>Комментарии</span>
+                </div>
+                <button class="notify-toggle" id="notifyToggle" type="button" aria-label="Уведомления">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" width="18" height="18">
+                        <path d="M12 4a4 4 0 0 0-4 4v2.2c0 .7-.2 1.3-.6 1.9L6 14.5V16h12v-1.5l-1.4-2.4a3.8 3.8 0 0 1-.6-1.9V8a4 4 0 0 0-4-4Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M10 19a2 2 0 0 0 4 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                    </svg>
+                </button>
             </div>
         </header>
         <section class="post-card" id="postCard" hidden>
@@ -1303,6 +1460,7 @@ HTML_TEMPLATE = """
         const replyBox = document.getElementById("replyBox");
         const contextMenu = document.getElementById("contextMenu");
         const composer = document.querySelector(".composer");
+        const notifyToggle = document.getElementById("notifyToggle");
         const mediaViewer = document.getElementById("mediaViewer");
         const mediaViewerDialog = document.getElementById("mediaViewerDialog");
         const mediaViewerImage = document.getElementById("mediaViewerImage");
@@ -1335,6 +1493,7 @@ HTML_TEMPLATE = """
         let editorDrawingEnabled = false;
         let editorIsDrawing = false;
         let editorLastPoint = null;
+        let notificationSettings = { notifications_enabled: true };
         const allowedImageTypes = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"]);
         const allowedVideoTypes = new Set(["video/mp4", "video/quicktime", "video/webm", "video/x-m4v"]);
         const allowedExtensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".webm", ".m4v"];
@@ -1354,6 +1513,53 @@ HTML_TEMPLATE = """
         function showStatus(message, type) {
             status.textContent = message;
             status.className = "status " + type;
+        }
+
+        function updateNotifyToggle() {
+            if (!notifyToggle) return;
+            const enabled = Boolean(notificationSettings && notificationSettings.notifications_enabled);
+            notifyToggle.classList.toggle("active", enabled);
+            notifyToggle.title = enabled ? "Уведомления включены" : "Уведомления выключены";
+        }
+
+        async function loadSettings() {
+            if (!initData) return;
+            try {
+                const url = new URL("/api/settings", window.location.origin);
+                url.searchParams.set("init_data", initData);
+                const response = await fetch(url);
+                const data = await response.json();
+                if (response.ok && data.settings) {
+                    notificationSettings = data.settings;
+                    updateNotifyToggle();
+                }
+            } catch (error) {
+                console.error(error);
+            }
+        }
+
+        async function toggleNotifications() {
+            if (!initData) return;
+            const nextValue = !Boolean(notificationSettings && notificationSettings.notifications_enabled);
+            try {
+                const response = await fetch("/api/settings/notifications", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ init_data: initData, enabled: nextValue })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || "Не удалось обновить уведомления");
+                notificationSettings.notifications_enabled = Boolean(data.notifications_enabled);
+                updateNotifyToggle();
+            } catch (error) {
+                showStatus(error.message || "Ошибка уведомлений", "error");
+            }
+        }
+
+        function openProfileLink(publicUsername) {
+            const username = String(publicUsername || "").trim();
+            if (!username) return;
+            window.open(`https://max.ru/${username}`, "_blank", "noopener");
         }
 
         function getConsentStorageKey() {
@@ -1725,6 +1931,7 @@ HTML_TEMPLATE = """
             const initial = escapeHtml((comment.username || "?").charAt(0).toUpperCase());
             const mediaUrl = comment.image_url ? encodeURI(comment.image_url) : "";
             const normalizedMediaType = normalizeMediaType(comment.media_type, mediaUrl);
+            const profileAction = comment.public_username ? `onclick="openProfileLink('${escapeHtml(comment.public_username)}')"` : "";
             const mediaHtml = comment.image_url
                 ? (normalizedMediaType === "video"
                     ? `<div class="message-video-shell"><video class="message-video" src="${mediaUrl}" controls playsinline preload="none"></video></div><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'video'); return false;">Открыть видео</a>`
@@ -1732,13 +1939,12 @@ HTML_TEMPLATE = """
                 : "";
             const editedHtml = comment.edited_at ? '<span>изменено</span>' : "";
             const parentPreview = comment.parent_preview ? `<div class="reply-pill" onclick="jumpToComment(${comment.parent_id})">Ответ для ${escapeHtml(comment.parent_preview.username)}: ${escapeHtml(comment.parent_preview.comment)}</div>` : "";
-            const replies = (replyMap[comment.id] || []).map((child) => `<div class="message-thread reply">${renderCommentNode(child, replyMap)}</div>`).join("");
             return `
                 <div class="message-thread">
                     <div class="message-row ${mine ? "mine" : ""}">
-                        ${mine ? "" : `<div class="avatar">${initial}</div>`}
+                        ${mine ? "" : `<div class="avatar" ${profileAction}>${initial}</div>`}
                         <div class="bubble" data-comment-id="${comment.id}">
-                            <div class="message-name">${escapeHtml(comment.username)}</div>
+                            <div class="message-name" ${profileAction}>${escapeHtml(comment.username)}</div>
                             ${parentPreview}
                             <div class="message-text">${escapeHtml(comment.comment)}</div>
                             ${mediaHtml}
@@ -1747,9 +1953,8 @@ HTML_TEMPLATE = """
                                 <span>${formatDate(comment.edited_at || comment.created_at)}</span>
                             </div>
                         </div>
-                        ${mine ? `<div class="avatar">${initial}</div>` : ""}
+                        ${mine ? `<div class="avatar" ${profileAction}>${initial}</div>` : ""}
                     </div>
-                    ${replies}
                 </div>
             `;
         }
@@ -1762,17 +1967,7 @@ HTML_TEMPLATE = """
             }
 
             const sorted = [...latestComments].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-            const replyMap = {};
-            const roots = [];
-            sorted.forEach((comment) => {
-                if (comment.parent_id) {
-                    if (!replyMap[comment.parent_id]) replyMap[comment.parent_id] = [];
-                    replyMap[comment.parent_id].push(comment);
-                } else {
-                    roots.push(comment);
-                }
-            });
-            commentsList.innerHTML = roots.map((comment) => renderCommentNode(comment, replyMap)).join("");
+            commentsList.innerHTML = sorted.map((comment) => renderCommentNode(comment, {})).join("");
         }
 
         async function loadComments() {
@@ -1919,16 +2114,22 @@ HTML_TEMPLATE = """
             document.querySelectorAll(".bubble[data-comment-id]").forEach((bubble) => {
                 const commentId = Number(bubble.dataset.commentId);
                 const start = () => {
+                    bubble.classList.add("press-anim");
                     clearTimeout(longPressTimer);
                     longPressTimer = setTimeout(() => openContextMenu(commentId, bubble), 450);
                 };
                 const cancel = () => {
+                    bubble.classList.remove("press-anim");
                     clearTimeout(longPressTimer);
                 };
                 const contextOpen = (event) => {
                     event.preventDefault();
                     cancel();
                     openContextMenu(commentId, bubble);
+                };
+                bubble.onclick = () => {
+                    bubble.classList.add("press-anim");
+                    setTimeout(() => bubble.classList.remove("press-anim"), 120);
                 };
                 bubble.onmousedown = start;
                 bubble.ontouchstart = start;
@@ -1970,6 +2171,7 @@ HTML_TEMPLATE = """
             postId = getStartParam(appInstance);
             currentUser = getMaxUser(appInstance);
             await hydrateUserFromServer();
+            await loadSettings();
 
             commentInput.addEventListener("input", () => {
                 syncComposerSpace();
@@ -1981,6 +2183,7 @@ HTML_TEMPLATE = """
                 }
             });
             submitBtn.addEventListener("click", sendComment);
+            notifyToggle.addEventListener("click", toggleNotifications);
             attachBtn.addEventListener("click", () => imageInput.click());
             editImageBtn.addEventListener("click", openImageEditor);
             imageInput.addEventListener("change", async () => {
@@ -2108,7 +2311,31 @@ def get_max_session():
     user = validate_max_init_data(payload.get("init_data", ""))
     if not user:
         return jsonify({"error": "Не удалось проверить initData MAX"}), 400
+    upsert_user_settings(user)
     return jsonify({"user": user})
+
+
+@app.route("/api/settings")
+def get_settings():
+    verified_user = validate_max_init_data((request.args.get("init_data") or "").strip())
+    if not verified_user:
+        return jsonify({"error": "Не удалось подтвердить пользователя MAX"}), 400
+    upsert_user_settings(verified_user)
+    return jsonify({"settings": get_user_settings(verified_user["user_id"])})
+
+
+@app.route("/api/settings/notifications", methods=["POST"])
+def update_notifications():
+    payload = request.get_json(silent=True) or {}
+    verified_user = validate_max_init_data(payload.get("init_data", ""))
+    if not verified_user:
+        return jsonify({"error": "Не удалось подтвердить пользователя MAX"}), 400
+    enabled = bool(payload.get("enabled", True))
+    upsert_user_settings(verified_user, 1 if enabled else 0)
+    sync_store_db("settings-update")
+    update_store_archive("settings-update")
+    create_backup("settings-update")
+    return jsonify({"status": "success", "notifications_enabled": enabled})
 
 
 @app.route("/api/post", methods=["POST"])
@@ -2159,6 +2386,7 @@ def get_comments_by_post(post_id):
     rows = conn.execute(
         """
         SELECT id, post_id, user_id, username, comment, image_path, media_path, media_type, parent_id, edited_at, created_at
+        , public_username
         FROM comments
         WHERE post_id = ?
         ORDER BY created_at DESC
@@ -2206,20 +2434,43 @@ def add_comment():
     created_at = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection()
     cursor = conn.cursor()
+    parent_comment = None
+    if normalized_parent_id:
+        parent_comment = conn.execute(
+            "SELECT id, user_id FROM comments WHERE id = ?",
+            (normalized_parent_id,),
+        ).fetchone()
     cursor.execute(
         """
-        INSERT INTO comments (post_id, user_id, username, comment, image_path, media_path, media_type, parent_id, edited_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO comments (post_id, user_id, username, public_username, comment, image_path, media_path, media_type, parent_id, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (post_id, verified_user["user_id"], verified_user["username"], comment, media_path, media_path, media_type, normalized_parent_id, None, created_at),
+        (
+            post_id,
+            verified_user["user_id"],
+            verified_user["username"],
+            verified_user.get("public_username", ""),
+            comment,
+            media_path,
+            media_path,
+            media_type,
+            normalized_parent_id,
+            None,
+            created_at,
+        ),
     )
     conn.commit()
     comment_id = cursor.lastrowid
     conn.close()
+    upsert_user_settings(verified_user)
     sync_store_db("comment-create")
     update_store_archive("comment-create")
     create_backup("comment-create")
     refresh_post_button(post_id)
+    if parent_comment and parent_comment["user_id"] != verified_user["user_id"]:
+        target_settings = get_user_settings(parent_comment["user_id"])
+        if target_settings.get("notifications_enabled"):
+            send_reply_notification(parent_comment["user_id"], verified_user["username"], comment, post_id)
 
     return jsonify({"status": "success", "comment": {"id": comment_id}})
 
