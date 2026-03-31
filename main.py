@@ -70,6 +70,7 @@ def init_db():
             user_id TEXT NOT NULL,
             username TEXT NOT NULL,
             public_username TEXT,
+            avatar_url TEXT,
             comment TEXT NOT NULL DEFAULT '',
             image_path TEXT,
             media_path TEXT,
@@ -86,6 +87,7 @@ def init_db():
             user_id TEXT PRIMARY KEY,
             username TEXT NOT NULL DEFAULT '',
             public_username TEXT,
+            avatar_url TEXT,
             notifications_enabled INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT ''
@@ -98,6 +100,8 @@ def init_db():
         cursor.execute("ALTER TABLE comments ADD COLUMN image_path TEXT")
     if "public_username" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN public_username TEXT")
+    if "avatar_url" not in comment_columns:
+        cursor.execute("ALTER TABLE comments ADD COLUMN avatar_url TEXT")
     if "media_path" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN media_path TEXT")
     if "media_type" not in comment_columns:
@@ -108,6 +112,7 @@ def init_db():
         cursor.execute("ALTER TABLE comments ADD COLUMN edited_at TEXT")
 
     post_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(posts)").fetchall()}
+    user_settings_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(user_settings)").fetchall()}
     if "source_post_id" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN source_post_id TEXT")
     if "button_message_id" not in post_columns:
@@ -122,6 +127,8 @@ def init_db():
         cursor.execute("ALTER TABLE posts ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
     if "created_at" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+    if "avatar_url" not in user_settings_columns:
+        cursor.execute("ALTER TABLE user_settings ADD COLUMN avatar_url TEXT")
 
     cursor.execute(
         """
@@ -434,10 +441,12 @@ def parse_max_user(raw_user: str | dict | None) -> dict | None:
     if not user_id:
         return None
     public_username = (user.get("username") or "").strip()
+    avatar_url = (user.get("avatar_url") or user.get("avatarUrl") or user.get("full_avatar_url") or user.get("fullAvatarUrl") or "").strip()
     return {
         "user_id": user_id[:128],
         "username": username[:50] or "Пользователь MAX",
         "public_username": public_username[:128],
+        "avatar_url": avatar_url[:1000],
     }
 
 
@@ -476,6 +485,7 @@ def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> d
         "user_id": row["user_id"],
         "username": row["username"],
         "public_username": row["public_username"] if "public_username" in row.keys() else "",
+        "avatar_url": row["avatar_url"] if "avatar_url" in row.keys() else "",
         "comment": row["comment"],
         "image_url": build_file_url(media_path),
         "media_type": media_type,
@@ -517,11 +527,12 @@ def upsert_user_settings(user: dict, notifications_enabled: int | None = None):
     effective_notifications = existing["notifications_enabled"] if existing and notifications_enabled is None else int(1 if notifications_enabled is None else notifications_enabled)
     conn.execute(
         """
-        INSERT INTO user_settings (user_id, username, public_username, notifications_enabled, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO user_settings (user_id, username, public_username, avatar_url, notifications_enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
             username = excluded.username,
             public_username = excluded.public_username,
+            avatar_url = excluded.avatar_url,
             notifications_enabled = excluded.notifications_enabled,
             updated_at = excluded.updated_at
         """,
@@ -529,6 +540,7 @@ def upsert_user_settings(user: dict, notifications_enabled: int | None = None):
             user["user_id"],
             user["username"],
             user.get("public_username", ""),
+            user.get("avatar_url", ""),
             effective_notifications,
             now,
             now,
@@ -541,7 +553,7 @@ def upsert_user_settings(user: dict, notifications_enabled: int | None = None):
 def get_user_settings(user_id: str) -> dict:
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT user_id, username, public_username, notifications_enabled FROM user_settings WHERE user_id = ?",
+        "SELECT user_id, username, public_username, avatar_url, notifications_enabled FROM user_settings WHERE user_id = ?",
         (user_id,),
     ).fetchone()
     conn.close()
@@ -551,6 +563,7 @@ def get_user_settings(user_id: str) -> dict:
         "user_id": row["user_id"],
         "username": row["username"],
         "public_username": row["public_username"] or "",
+        "avatar_url": row["avatar_url"] or "",
         "notifications_enabled": bool(row["notifications_enabled"]),
     }
 
@@ -826,6 +839,17 @@ HTML_TEMPLATE = """
             color: white;
             font-weight: 700;
             flex-shrink: 0;
+            overflow: hidden;
+            cursor: pointer;
+            background-size: cover;
+            background-position: center;
+        }
+
+        .avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
         }
 
         .bubble {
@@ -1932,6 +1956,9 @@ HTML_TEMPLATE = """
             const mediaUrl = comment.image_url ? encodeURI(comment.image_url) : "";
             const normalizedMediaType = normalizeMediaType(comment.media_type, mediaUrl);
             const profileAction = comment.public_username ? `onclick="openProfileLink('${escapeHtml(comment.public_username)}')"` : "";
+            const avatarHtml = comment.avatar_url
+                ? `<div class="avatar" ${profileAction}><img src="${encodeURI(comment.avatar_url)}" alt="${escapeHtml(comment.username)}" loading="lazy"></div>`
+                : `<div class="avatar" ${profileAction}>${initial}</div>`;
             const mediaHtml = comment.image_url
                 ? (normalizedMediaType === "video"
                     ? `<div class="message-video-shell"><video class="message-video" src="${mediaUrl}" controls playsinline preload="none"></video></div><a class="media-link" href="#" onclick="openMediaViewer('${mediaUrl}', 'video'); return false;">Открыть видео</a>`
@@ -1942,7 +1969,7 @@ HTML_TEMPLATE = """
             return `
                 <div class="message-thread">
                     <div class="message-row ${mine ? "mine" : ""}">
-                        ${mine ? "" : `<div class="avatar" ${profileAction}>${initial}</div>`}
+                        ${mine ? "" : avatarHtml}
                         <div class="bubble" data-comment-id="${comment.id}">
                             <div class="message-name" ${profileAction}>${escapeHtml(comment.username)}</div>
                             ${parentPreview}
@@ -1953,7 +1980,7 @@ HTML_TEMPLATE = """
                                 <span>${formatDate(comment.edited_at || comment.created_at)}</span>
                             </div>
                         </div>
-                        ${mine ? `<div class="avatar" ${profileAction}>${initial}</div>` : ""}
+                        ${mine ? avatarHtml : ""}
                     </div>
                 </div>
             `;
@@ -2386,8 +2413,10 @@ def get_comments_by_post(post_id):
     rows = conn.execute(
         """
         SELECT id, post_id, user_id, username, comment, image_path, media_path, media_type, parent_id, edited_at, created_at
-        , public_username
+        , COALESCE(comments.public_username, user_settings.public_username) AS public_username
+        , COALESCE(comments.avatar_url, user_settings.avatar_url) AS avatar_url
         FROM comments
+        LEFT JOIN user_settings ON user_settings.user_id = comments.user_id
         WHERE post_id = ?
         ORDER BY created_at DESC
         """,
@@ -2442,14 +2471,15 @@ def add_comment():
         ).fetchone()
     cursor.execute(
         """
-        INSERT INTO comments (post_id, user_id, username, public_username, comment, image_path, media_path, media_type, parent_id, edited_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO comments (post_id, user_id, username, public_username, avatar_url, comment, image_path, media_path, media_type, parent_id, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             post_id,
             verified_user["user_id"],
             verified_user["username"],
             verified_user.get("public_username", ""),
+            verified_user.get("avatar_url", ""),
             comment,
             media_path,
             media_path,
