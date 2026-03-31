@@ -911,10 +911,10 @@ HTML_TEMPLATE = """
         .composer {
             position: fixed;
             left: 50%;
-            bottom: 0;
+            bottom: -2px;
             transform: translateX(-50%);
             width: min(760px, 100%);
-            padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+            padding: 10px 8px calc(10px + env(safe-area-inset-bottom));
             background: transparent;
         }
 
@@ -1032,14 +1032,13 @@ HTML_TEMPLATE = """
         }
 
         .composer-actions {
-            margin-top: 6px;
+            margin-top: 4px;
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-end;
             gap: 10px;
         }
 
-        .hint,
         .status {
             font-size: 12px;
             color: var(--tg-muted);
@@ -1182,10 +1181,7 @@ HTML_TEMPLATE = """
                 </div>
             </div>
             <div class="composer-actions">
-                <div>
-                    <div class="hint"><span id="charCount">0</span>/1000</div>
-                    <div class="status" id="status"></div>
-                </div>
+                <div class="status" id="status"></div>
             </div>
         </div>
     </div>
@@ -1611,7 +1607,6 @@ HTML_TEMPLATE = """
             previewVideo.hidden = true;
             previewVideo.load();
             editImageBtn.hidden = true;
-            submitBtn.textContent = "Отправить";
             replyBox.classList.remove("show");
             replyBox.textContent = "";
             syncComposerSpace();
@@ -1736,7 +1731,7 @@ HTML_TEMPLATE = """
                 if (!response.ok) throw new Error(data.error || "Ошибка отправки");
                 const wasEditing = Boolean(editingCommentId);
                 resetComposer();
-                showStatus(wasEditing ? "Комментарий обновлён" : "Комментарий отправлен", "success");
+                showStatus("", "");
                 await loadComments();
             } catch (error) {
                 showStatus(error.message || "Не удалось отправить комментарий", "error");
@@ -1769,7 +1764,6 @@ HTML_TEMPLATE = """
             replyToCommentId = null;
             commentInput.value = comment.comment || "";
             charCount.textContent = commentInput.value.length;
-            submitBtn.textContent = "Сохранить";
             replyBox.classList.remove("show");
             commentInput.focus();
             showStatus("Редактирование комментария", "");
@@ -1781,7 +1775,6 @@ HTML_TEMPLATE = """
             if (!comment) return;
             editingCommentId = null;
             replyToCommentId = commentId;
-            submitBtn.textContent = "Отправить";
             replyBox.classList.add("show");
             replyBox.textContent = `Ответ для ${comment.username}: ${comment.comment || "фото"}`;
             commentInput.focus();
