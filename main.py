@@ -440,8 +440,23 @@ def parse_max_user(raw_user: str | dict | None) -> dict | None:
     user_id = str(user.get("user_id") or user.get("id") or "").strip()
     if not user_id:
         return None
-    public_username = (user.get("username") or "").strip()
-    avatar_url = (user.get("avatar_url") or user.get("avatarUrl") or user.get("full_avatar_url") or user.get("fullAvatarUrl") or "").strip()
+    public_username = (user.get("username") or user.get("login") or "").strip()
+    avatar = user.get("avatar") if isinstance(user.get("avatar"), dict) else {}
+    photo = user.get("photo") if isinstance(user.get("photo"), dict) else {}
+    avatar_url = (
+        user.get("avatar_url")
+        or user.get("avatarUrl")
+        or user.get("full_avatar_url")
+        or user.get("fullAvatarUrl")
+        or user.get("photo_url")
+        or user.get("photoUrl")
+        or user.get("picture")
+        or avatar.get("url")
+        or avatar.get("full_url")
+        or photo.get("url")
+        or photo.get("full_url")
+        or ""
+    ).strip()
     return {
         "user_id": user_id[:128],
         "username": username[:50] or "Пользователь MAX",
@@ -973,6 +988,18 @@ HTML_TEMPLATE = """
             box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
         }
 
+        .media-viewer-dialog.video-mode {
+            width: min(100%, 100vw);
+            max-width: 100vw;
+            max-height: 100vh;
+            height: 100vh;
+            border-radius: 0;
+            padding: 24px;
+            background: rgba(4, 10, 18, 0.98);
+            border: none;
+            box-shadow: none;
+        }
+
         .media-viewer-image,
         .media-viewer-video {
             max-width: 100%;
@@ -980,6 +1007,13 @@ HTML_TEMPLATE = """
             border-radius: 18px;
             display: block;
             background: #000;
+        }
+
+        .media-viewer-dialog.video-mode .media-viewer-video {
+            width: 100%;
+            max-width: 100%;
+            max-height: calc(100vh - 48px);
+            border-radius: 18px;
         }
 
         .media-viewer-close {
@@ -1544,6 +1578,8 @@ HTML_TEMPLATE = """
         let editorIsDrawing = false;
         let editorLastPoint = null;
         let notificationSettings = { notifications_enabled: true };
+        let lastCommentsRenderSignature = "";
+        let lastRenderedPostText = "";
         const allowedImageTypes = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"]);
         const allowedVideoTypes = new Set(["video/mp4", "video/quicktime", "video/webm", "video/x-m4v"]);
         const allowedExtensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".webm", ".m4v"];
@@ -1570,6 +1606,19 @@ HTML_TEMPLATE = """
             const enabled = Boolean(notificationSettings && notificationSettings.notifications_enabled);
             notifyToggle.classList.toggle("active", enabled);
             notifyToggle.title = enabled ? "Уведомления включены" : "Уведомления выключены";
+        }
+
+        function buildCommentsSignature(comments) {
+            return (comments || []).map((comment) => [
+                comment.id,
+                comment.edited_at || "",
+                comment.created_at || "",
+                comment.comment || "",
+                comment.image_url || "",
+                comment.media_type || "",
+                comment.avatar_url || "",
+                comment.public_username || ""
+            ].join("|")).join("::");
         }
 
         async function loadSettings() {
@@ -1613,7 +1662,7 @@ HTML_TEMPLATE = """
         }
 
         function getConsentStorageKey() {
-            return `max-comments-consent:${postId || "global"}`;
+            return "max-comments-consent:global";
         }
 
         function hasConsent() {
@@ -1812,6 +1861,7 @@ HTML_TEMPLATE = """
         function closeMediaViewer() {
             mediaViewer.classList.remove("show");
             mediaViewer.setAttribute("aria-hidden", "true");
+            mediaViewerDialog.classList.remove("video-mode");
             mediaViewerImage.removeAttribute("src");
             mediaViewerImage.hidden = true;
             mediaViewerImage.style.display = "none";
@@ -1839,6 +1889,7 @@ HTML_TEMPLATE = """
             if (!url) return;
             const normalizedType = normalizeMediaType(mediaType, url);
             const isVideo = normalizedType === "video";
+            mediaViewerDialog.classList.toggle("video-mode", isVideo);
             mediaViewerImage.removeAttribute("src");
             mediaViewerVideo.pause();
             mediaViewerVideo.removeAttribute("src");
@@ -2033,11 +2084,17 @@ function setPreviewFromFile(file) {
         function renderComments(comments) {
             latestComments = comments || [];
             if (!latestComments.length) {
+                lastCommentsRenderSignature = "";
                 commentsList.innerHTML = '<div class="empty">Пока нет комментариев. Можно написать первый.</div>';
                 return;
             }
 
             const sorted = [...latestComments].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+            const signature = buildCommentsSignature(sorted);
+            if (signature === lastCommentsRenderSignature) {
+                return;
+            }
+            lastCommentsRenderSignature = signature;
             commentsList.innerHTML = sorted.map((comment) => renderCommentNode(comment, {})).join("");
         }
 
@@ -2053,11 +2110,14 @@ function setPreviewFromFile(file) {
                 const response = await fetch(url);
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Ошибка загрузки");
-                if (data.post && data.post.post_text) {
+                const nextPostText = data.post && data.post.post_text ? data.post.post_text : "";
+                if (nextPostText && nextPostText !== lastRenderedPostText) {
                     postCard.hidden = false;
-                    postCardText.textContent = data.post.post_text;
-                } else {
+                    postCardText.textContent = nextPostText;
+                    lastRenderedPostText = nextPostText;
+                } else if (!nextPostText) {
                     postCard.hidden = true;
+                    lastRenderedPostText = "";
                 }
                 renderComments(data.comments || []);
                 bindContextHandlers();
