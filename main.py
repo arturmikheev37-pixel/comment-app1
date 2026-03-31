@@ -908,8 +908,7 @@ HTML_TEMPLATE = """
             cursor: zoom-in;
         }
 
-        .message-video-shell,
-        .preview-video-shell {
+        .message-video-shell {
             margin-top: 8px;
             width: min(100%, 180px);
             aspect-ratio: 9 / 14;
@@ -1233,31 +1232,39 @@ HTML_TEMPLATE = """
         .preview {
             margin-top: 8px;
             display: none;
+            width: fit-content;
+            max-width: 160px;
         }
 
         .preview.show {
-            display: block;
+            display: inline-block;
         }
 
         .preview img,
         .preview video {
-            max-width: 128px;
-            max-height: 120px;
+            max-width: 96px;
+            max-height: 96px;
             border-radius: 12px;
             display: block;
         }
 
         .preview-video-shell {
             margin-top: 0;
-            width: 128px;
-            aspect-ratio: 9 / 14;
+            width: 96px;
+            aspect-ratio: 1 / 1;
             border-radius: 12px;
+            overflow: hidden;
+            background: #0a0f15;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
 
         .preview-actions {
             margin-top: 6px;
             display: flex;
             gap: 8px;
+            flex-wrap: wrap;
         }
 
         .composer-actions {
@@ -1911,8 +1918,11 @@ HTML_TEMPLATE = """
                 return;
             }
             const isVideo = (file.type || "").startsWith("video/");
+            previewImage.removeAttribute("src");
             previewImage.hidden = isVideo;
             previewVideoShell.hidden = !isVideo;
+            previewVideo.pause();
+            previewVideo.removeAttribute("src");
             previewVideo.hidden = !isVideo;
             editImageBtn.hidden = isVideo;
             if (isVideo) {
@@ -1956,8 +1966,9 @@ HTML_TEMPLATE = """
             const mediaUrl = comment.image_url ? encodeURI(comment.image_url) : "";
             const normalizedMediaType = normalizeMediaType(comment.media_type, mediaUrl);
             const profileAction = comment.public_username ? `onclick="openProfileLink('${escapeHtml(comment.public_username)}')"` : "";
-            const avatarHtml = comment.avatar_url
-                ? `<div class="avatar" ${profileAction}><img src="${encodeURI(comment.avatar_url)}" alt="${escapeHtml(comment.username)}" loading="lazy"></div>`
+            const avatarUrl = comment.avatar_url ? encodeURI(comment.avatar_url) : "";
+            const avatarHtml = avatarUrl
+                ? `<div class="avatar" ${profileAction}><img src="${avatarUrl}" alt="${escapeHtml(comment.username)}" loading="lazy" onerror="this.style.display='none'; this.parentElement.textContent='${initial}'"></div>`
                 : `<div class="avatar" ${profileAction}>${initial}</div>`;
             const mediaHtml = comment.image_url
                 ? (normalizedMediaType === "video"
