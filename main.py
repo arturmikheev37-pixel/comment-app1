@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import uuid
 import zipfile
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, quote
 from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, render_template_string, request, send_from_directory
@@ -705,6 +705,40 @@ def get_chat_admin_ids(chat_id: str) -> set[str]:
     return set()
 
 
+def is_chat_admin(chat_id: str, user_id: str) -> bool:
+    if not BOT_TOKEN or not chat_id or not user_id:
+        return False
+
+    urls = [
+        f"https://platform-api.max.ru/chats/{chat_id}/members?user_ids={quote(str(user_id))}",
+        f"https://platform-api.max.ru/chats/{chat_id}/members/{quote(str(user_id))}",
+    ]
+    for url in urls:
+        try:
+            req = Request(
+                url=url,
+                headers={"Authorization": BOT_TOKEN},
+                method="GET",
+            )
+            with urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            if isinstance(data, list):
+                for item in data:
+                    if _extract_member_user_id(item) == str(user_id) and _member_is_admin(item):
+                        return True
+            elif isinstance(data, dict):
+                direct_candidate = _extract_member_user_id(data)
+                if direct_candidate == str(user_id) and _member_is_admin(data):
+                    return True
+                members = data.get("members") or data.get("participants") or data.get("items") or []
+                for item in members:
+                    if _extract_member_user_id(item) == str(user_id) and _member_is_admin(item):
+                        return True
+        except Exception:
+            continue
+    return str(user_id) in get_chat_admin_ids(chat_id)
+
+
 def user_can_moderate_comment(user_id: str, post_id: str) -> bool:
     post = get_post_info(post_id)
     if not post:
@@ -712,7 +746,7 @@ def user_can_moderate_comment(user_id: str, post_id: str) -> bool:
     source_chat_id = str(post.get("source_chat_id") or "").strip()
     if not source_chat_id:
         return False
-    return user_id in get_chat_admin_ids(source_chat_id)
+    return is_chat_admin(source_chat_id, str(user_id))
 
 
 def send_reply_notification(target_user_id: str, actor_name: str, actor_comment: str, post_id: str):
@@ -1511,7 +1545,7 @@ HTML_TEMPLATE = """
         }
 
         .context-overlay-inner {
-            width: min(100%, 420px);
+            width: min(100%, 240px);
             display: flex;
             flex-direction: column;
             gap: 12px;
