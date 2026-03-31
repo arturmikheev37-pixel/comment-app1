@@ -89,6 +89,7 @@ def init_db():
             public_username TEXT,
             avatar_url TEXT,
             notifications_enabled INTEGER NOT NULL DEFAULT 1,
+            consent_accepted INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT ''
         )
@@ -129,6 +130,8 @@ def init_db():
         cursor.execute("ALTER TABLE posts ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
     if "avatar_url" not in user_settings_columns:
         cursor.execute("ALTER TABLE user_settings ADD COLUMN avatar_url TEXT")
+    if "consent_accepted" not in user_settings_columns:
+        cursor.execute("ALTER TABLE user_settings ADD COLUMN consent_accepted INTEGER NOT NULL DEFAULT 0")
 
     cursor.execute(
         """
@@ -532,23 +535,25 @@ def get_post_info(post_id: str) -> dict | None:
     }
 
 
-def upsert_user_settings(user: dict, notifications_enabled: int | None = None):
+def upsert_user_settings(user: dict, notifications_enabled: int | None = None, consent_accepted: int | None = None):
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection()
     existing = conn.execute(
-        "SELECT notifications_enabled FROM user_settings WHERE user_id = ?",
+        "SELECT notifications_enabled, consent_accepted FROM user_settings WHERE user_id = ?",
         (user["user_id"],),
     ).fetchone()
     effective_notifications = existing["notifications_enabled"] if existing and notifications_enabled is None else int(1 if notifications_enabled is None else notifications_enabled)
+    effective_consent = existing["consent_accepted"] if existing and consent_accepted is None else int(1 if consent_accepted else 0)
     conn.execute(
         """
-        INSERT INTO user_settings (user_id, username, public_username, avatar_url, notifications_enabled, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO user_settings (user_id, username, public_username, avatar_url, notifications_enabled, consent_accepted, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
             username = excluded.username,
             public_username = excluded.public_username,
             avatar_url = excluded.avatar_url,
             notifications_enabled = excluded.notifications_enabled,
+            consent_accepted = excluded.consent_accepted,
             updated_at = excluded.updated_at
         """,
         (
@@ -557,6 +562,7 @@ def upsert_user_settings(user: dict, notifications_enabled: int | None = None):
             user.get("public_username", ""),
             user.get("avatar_url", ""),
             effective_notifications,
+            effective_consent,
             now,
             now,
         ),
@@ -568,7 +574,7 @@ def upsert_user_settings(user: dict, notifications_enabled: int | None = None):
 def get_user_settings(user_id: str) -> dict:
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT user_id, username, public_username, avatar_url, notifications_enabled FROM user_settings WHERE user_id = ?",
+        "SELECT user_id, username, public_username, avatar_url, notifications_enabled, consent_accepted FROM user_settings WHERE user_id = ?",
         (user_id,),
     ).fetchone()
     conn.close()
@@ -580,6 +586,7 @@ def get_user_settings(user_id: str) -> dict:
         "public_username": row["public_username"] or "",
         "avatar_url": row["avatar_url"] or "",
         "notifications_enabled": bool(row["notifications_enabled"]),
+        "consent_accepted": bool(row["consent_accepted"]),
     }
 
 
@@ -1629,7 +1636,10 @@ HTML_TEMPLATE = """
                 const response = await fetch(url);
                 const data = await response.json();
                 if (response.ok && data.settings) {
-                    notificationSettings = data.settings;
+                    notificationSettings = {
+                        notifications_enabled: Boolean(data.settings.notifications_enabled),
+                        consent_accepted: Boolean(data.settings.consent_accepted),
+                    };
                     updateNotifyToggle();
                 }
             } catch (error) {
@@ -1661,16 +1671,8 @@ HTML_TEMPLATE = """
             window.open(`https://max.ru/${username}`, "_blank", "noopener");
         }
 
-        function getConsentStorageKey() {
-            return "max-comments-consent:global";
-        }
-
         function hasConsent() {
-            try {
-                return localStorage.getItem(getConsentStorageKey()) === "accepted";
-            } catch (error) {
-                return false;
-            }
+            return Boolean(notificationSettings && notificationSettings.consent_accepted);
         }
 
         function openConsentModal() {
@@ -1685,11 +1687,20 @@ HTML_TEMPLATE = """
             document.body.style.overflow = mediaViewer.classList.contains("show") || imageEditorModal.classList.contains("show") ? "hidden" : "";
         }
 
-        function acceptConsent() {
+        async function acceptConsent() {
+            if (!initData) return;
             try {
-                localStorage.setItem(getConsentStorageKey(), "accepted");
+                const response = await fetch("/api/settings/consent", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ init_data: initData, accepted: true })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || "Не удалось сохранить согласие");
+                notificationSettings.consent_accepted = Boolean(data.consent_accepted);
             } catch (error) {
-                console.error(error);
+                showStatus(error.message || "Ошибка согласия", "error");
+                return;
             }
             closeConsentModal();
         }
@@ -2467,6 +2478,20 @@ def update_notifications():
     update_store_archive("settings-update")
     create_backup("settings-update")
     return jsonify({"status": "success", "notifications_enabled": enabled})
+
+
+@app.route("/api/settings/consent", methods=["POST"])
+def update_consent():
+    payload = request.get_json(silent=True) or {}
+    verified_user = validate_max_init_data(payload.get("init_data", ""))
+    if not verified_user:
+        return jsonify({"error": "Не удалось подтвердить пользователя MAX"}), 400
+    accepted = bool(payload.get("accepted", True))
+    upsert_user_settings(verified_user, consent_accepted=1 if accepted else 0)
+    sync_store_db("consent-update")
+    update_store_archive("consent-update")
+    create_backup("consent-update")
+    return jsonify({"status": "success", "consent_accepted": accepted})
 
 
 @app.route("/api/post", methods=["POST"])
