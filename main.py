@@ -688,8 +688,8 @@ HTML_TEMPLATE = """
 
         .bubble {
             max-width: min(85%, 560px);
-            padding: 9px 11px 8px;
-            border-radius: 18px 18px 18px 6px;
+            padding: 8px 12px 7px;
+            border-radius: 18px 18px 18px 8px;
             background: var(--tg-incoming);
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
             overflow: hidden;
@@ -697,7 +697,7 @@ HTML_TEMPLATE = """
 
         .message-row.mine .bubble {
             background: var(--tg-outgoing);
-            border-radius: 18px 18px 6px 18px;
+            border-radius: 18px 18px 8px 18px;
         }
 
         .message-name {
@@ -921,8 +921,8 @@ HTML_TEMPLATE = """
         .composer-card {
             background: rgba(23, 33, 43, 0.96);
             border: 1px solid var(--tg-panel-border);
-            border-radius: 18px;
-            padding: 6px;
+            border-radius: 22px;
+            padding: 8px;
             box-shadow: 0 12px 34px rgba(0, 0, 0, 0.28);
         }
 
@@ -940,6 +940,12 @@ HTML_TEMPLATE = """
             display: block;
         }
 
+        .composer-entry {
+            display: flex;
+            align-items: flex-end;
+            gap: 8px;
+        }
+
         textarea {
             width: 100%;
             min-height: 40px;
@@ -948,8 +954,8 @@ HTML_TEMPLATE = """
             background: #223140;
             border: 1px solid transparent;
             color: white;
-            border-radius: 15px;
-            padding: 9px 12px;
+            border-radius: 18px;
+            padding: 10px 14px;
             outline: none;
             font: inherit;
             font-size: 14px;
@@ -961,21 +967,25 @@ HTML_TEMPLATE = """
         }
 
         .attachment-row {
-            margin-top: 4px;
             display: flex;
             align-items: center;
-            justify-content: space-between;
-            gap: 8px;
+            justify-content: flex-start;
+            gap: 0;
         }
 
         .attach-btn {
             border: none;
             background: #223140;
             color: #d7e9ff;
-            font: inherit;
-            border-radius: 14px;
-            padding: 8px 12px;
+            border-radius: 50%;
+            width: 42px;
+            height: 42px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
             cursor: pointer;
+            flex-shrink: 0;
         }
 
         .preview {
@@ -1009,7 +1019,7 @@ HTML_TEMPLATE = """
         }
 
         .composer-actions {
-            margin-top: 4px;
+            margin-top: 6px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -1034,11 +1044,15 @@ HTML_TEMPLATE = """
             border: none;
             background: var(--tg-accent);
             color: white;
-            font: inherit;
-            font-weight: 700;
-            border-radius: 15px;
-            padding: 8px 12px;
+            border-radius: 50%;
+            width: 42px;
+            height: 42px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
             cursor: pointer;
+            flex-shrink: 0;
         }
 
         .send-btn:disabled {
@@ -1095,10 +1109,6 @@ HTML_TEMPLATE = """
                 max-width: calc(100vw - 76px);
             }
 
-            .send-btn {
-                width: 100%;
-            }
-
             .composer-actions {
                 align-items: flex-start;
                 flex-direction: column;
@@ -1124,10 +1134,13 @@ HTML_TEMPLATE = """
     <div class="composer">
         <div class="composer-card">
             <div class="reply-box" id="replyBox"></div>
-            <textarea id="comment" maxlength="1000" placeholder="Написать комментарий..."></textarea>
-            <div class="attachment-row">
-                <button class="attach-btn" id="attachBtn" type="button">Фото/видео</button>
-                <input id="imageInput" type="file" accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.mp4,.mov,.webm,.m4v,image/jpeg,image/png,image/gif,image/webp,image/bmp,video/mp4,video/quicktime,video/webm,video/x-m4v" hidden>
+            <div class="composer-entry">
+                <div class="attachment-row">
+                    <button class="attach-btn" id="attachBtn" type="button" aria-label="Прикрепить файл">📎</button>
+                    <input id="imageInput" type="file" accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.mp4,.mov,.webm,.m4v,image/jpeg,image/png,image/gif,image/webp,image/bmp,video/mp4,video/quicktime,video/webm,video/x-m4v" hidden>
+                </div>
+                <textarea id="comment" maxlength="1000" placeholder="Сообщение"></textarea>
+                <button id="submitBtn" class="send-btn" type="button" aria-label="Отправить">➤</button>
             </div>
             <div class="preview" id="imagePreview">
                 <img id="previewImage" alt="preview" hidden>
@@ -1144,7 +1157,6 @@ HTML_TEMPLATE = """
                     <div class="hint"><span id="charCount">0</span>/1000</div>
                     <div class="status" id="status"></div>
                 </div>
-                <button id="submitBtn" class="send-btn" type="button">Отправить</button>
             </div>
         </div>
     </div>
