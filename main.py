@@ -1493,37 +1493,82 @@ HTML_TEMPLATE = """
             cursor: not-allowed;
         }
 
-        .context-menu {
+        .context-overlay {
             position: fixed;
-            z-index: 31;
+            inset: 0;
+            z-index: 70;
             display: none;
-            min-width: 170px;
-            max-width: min(92vw, 240px);
-            padding: 6px;
-            border-radius: 16px;
-            background: rgba(23, 33, 43, 0.99);
-            border: 1px solid var(--tg-panel-border);
-            box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
+            padding: 16px;
+            background: rgba(3, 10, 18, 0.54);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            align-items: flex-end;
+            justify-content: center;
         }
 
-        .context-menu.show {
-            display: block;
+        .context-overlay.show {
+            display: flex;
+        }
+
+        .context-overlay-inner {
+            width: min(100%, 420px);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: calc(8px + env(safe-area-inset-bottom));
+        }
+
+        .context-preview {
+            pointer-events: none;
+        }
+
+        .context-preview .message-row {
+            margin: 0;
+        }
+
+        .context-preview .bubble {
+            transform: scale(1);
+            box-shadow: 0 24px 50px rgba(0, 0, 0, 0.28);
+        }
+
+        .context-menu {
+            width: 100%;
+            padding: 8px;
+            border-radius: 24px;
+            background: rgba(23, 33, 43, 0.98);
+            border: 1px solid var(--tg-panel-border);
+            box-shadow: 0 20px 48px rgba(0, 0, 0, 0.35);
         }
 
         .context-menu button {
             width: 100%;
+            display: flex;
+            align-items: center;
+            gap: 12px;
             text-align: left;
             border: none;
             background: transparent;
             color: #ffffff;
             font: inherit;
-            padding: 10px 12px;
-            border-radius: 12px;
+            font-size: 15px;
+            padding: 12px 14px;
+            border-radius: 16px;
             cursor: pointer;
         }
 
         .context-menu button:hover {
             background: rgba(255, 255, 255, 0.08);
+        }
+
+        .context-menu svg {
+            width: 18px;
+            height: 18px;
+            flex-shrink: 0;
+            opacity: 0.92;
+        }
+
+        .context-menu button.danger {
+            color: #ff9d9d;
         }
 
         .jump-highlight {
@@ -1614,7 +1659,12 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <div class="context-menu" id="contextMenu"></div>
+    <div class="context-overlay" id="contextOverlay" aria-hidden="true">
+        <div class="context-overlay-inner">
+            <div class="context-preview" id="contextPreview"></div>
+            <div class="context-menu" id="contextMenu"></div>
+        </div>
+    </div>
     <div class="media-viewer" id="mediaViewer" aria-hidden="true">
         <div class="media-viewer-dialog" id="mediaViewerDialog">
             <button class="media-viewer-close" id="mediaViewerClose" type="button" aria-label="Закрыть">×</button>
@@ -1667,6 +1717,8 @@ HTML_TEMPLATE = """
         const postCard = document.getElementById("postCard");
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
+        const contextOverlay = document.getElementById("contextOverlay");
+        const contextPreview = document.getElementById("contextPreview");
         const contextMenu = document.getElementById("contextMenu");
         const composer = document.querySelector(".composer");
         const notifyToggle = document.getElementById("notifyToggle");
@@ -1695,6 +1747,7 @@ HTML_TEMPLATE = """
         let replyToCommentId = null;
         let latestComments = [];
         let menuCommentId = null;
+        let menuTargetElement = null;
         let longPressTimer = null;
         let currentPreviewObjectUrl = null;
         let editorImage = null;
@@ -1724,6 +1777,10 @@ HTML_TEMPLATE = """
         function showStatus(message, type) {
             status.textContent = message;
             status.className = "status " + type;
+        }
+
+        function buildMenuButton(label, iconPath, action, extraClass = "") {
+            return `<button type="button" class="${extraClass}" onclick="${action}"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true">${iconPath}</svg><span>${label}</span></button>`;
         }
 
         function updateNotifyToggle() {
@@ -2355,22 +2412,42 @@ function setPreviewFromFile(file) {
             const canEdit = Boolean(comment.can_edit);
             const canDelete = Boolean(comment.can_delete);
             menuCommentId = commentId;
+            menuTargetElement = targetElement;
+            const row = targetElement.closest(".message-row");
+            contextPreview.innerHTML = row ? row.outerHTML : "";
             contextMenu.innerHTML = `
-                <button type="button" onclick="menuReply()">Ответить</button>
-                ${canEdit ? '<button type="button" onclick="menuEdit()">Редактировать</button>' : ''}
-                ${canDelete ? '<button type="button" onclick="menuDelete()">Удалить</button>' : ''}
+                ${buildMenuButton(
+                    "Ответить",
+                    '<path d="M10 7 4 12l6 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 12h8a6 6 0 0 1 6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+                    "menuReply()"
+                )}
+                ${buildMenuButton(
+                    "Скопировать",
+                    '<rect x="9" y="9" width="10" height="10" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+                    "menuCopy()"
+                )}
+                ${canEdit ? buildMenuButton(
+                    "Редактировать",
+                    '<path d="m4 20 4.5-1 9-9a2.1 2.1 0 0 0-3-3l-9 9L4 20Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 7.5 16.5 10.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+                    "menuEdit()"
+                ) : ""}
+                ${canDelete ? buildMenuButton(
+                    "Удалить",
+                    '<path d="M5 7h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" stroke="currentColor" stroke-width="1.8"/><path d="M8 7l1 11a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2l1-11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+                    "menuDelete()",
+                    "danger"
+                ) : ""}
             `;
-            const rect = targetElement.getBoundingClientRect();
-            const left = Math.min(window.innerWidth - 220, Math.max(8, rect.left));
-            const top = Math.min(window.innerHeight - 180, Math.max(8, rect.top - 12));
-            contextMenu.style.left = left + "px";
-            contextMenu.style.top = top + "px";
-            contextMenu.classList.add("show");
+            contextOverlay.classList.add("show");
+            contextOverlay.setAttribute("aria-hidden", "false");
         }
 
         function closeContextMenu() {
-            contextMenu.classList.remove("show");
+            contextOverlay.classList.remove("show");
+            contextOverlay.setAttribute("aria-hidden", "true");
+            contextPreview.innerHTML = "";
             menuCommentId = null;
+            menuTargetElement = null;
         }
 
         function bindContextHandlers() {
@@ -2416,6 +2493,31 @@ function setPreviewFromFile(file) {
             const id = menuCommentId;
             closeContextMenu();
             startEdit(id);
+        }
+
+        async function menuCopy() {
+            if (!menuCommentId) return;
+            const comment = latestComments.find((item) => item.id === menuCommentId);
+            if (!comment) return;
+            const copyText = (comment.comment || "").trim() || (comment.media_type === "video" ? "Видео" : "Фото");
+            closeContextMenu();
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(copyText);
+                    showStatus("Комментарий скопирован", "success");
+                    return;
+                }
+            } catch (error) {}
+            const fallback = document.createElement("textarea");
+            fallback.value = copyText;
+            fallback.setAttribute("readonly", "");
+            fallback.style.position = "fixed";
+            fallback.style.opacity = "0";
+            document.body.appendChild(fallback);
+            fallback.select();
+            document.execCommand("copy");
+            document.body.removeChild(fallback);
+            showStatus("Комментарий скопирован", "success");
         }
 
         async function menuDelete() {
@@ -2519,11 +2621,12 @@ function setPreviewFromFile(file) {
             imageEditorCanvas.addEventListener("touchmove", moveCanvasDraw, { passive: false });
             imageEditorCanvas.addEventListener("touchend", stopCanvasDraw);
             imageEditorCanvas.addEventListener("touchcancel", stopCanvasDraw);
-            document.addEventListener("click", (event) => {
-                if (!contextMenu.contains(event.target)) {
+            contextOverlay.addEventListener("click", (event) => {
+                if (event.target === contextOverlay) {
                     closeContextMenu();
                 }
             });
+            contextMenu.addEventListener("click", (event) => event.stopPropagation());
             mediaViewer.addEventListener("click", (event) => {
                 if (event.target === mediaViewer) {
                     closeMediaViewer();
@@ -2540,6 +2643,9 @@ function setPreviewFromFile(file) {
                 if (event.key === "Escape" && imageEditorModal.classList.contains("show")) {
                     closeImageEditor();
                 }
+                if (event.key === "Escape" && contextOverlay.classList.contains("show")) {
+                    closeContextMenu();
+                }
             });
             window.addEventListener("resize", syncComposerSpace);
 
@@ -2552,6 +2658,7 @@ function setPreviewFromFile(file) {
         }
 
         window.menuReply = menuReply;
+        window.menuCopy = menuCopy;
         window.menuEdit = menuEdit;
         window.menuDelete = menuDelete;
         window.jumpToComment = jumpToComment;
