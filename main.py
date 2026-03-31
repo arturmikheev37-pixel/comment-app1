@@ -601,6 +601,63 @@ def build_profile_url(public_username: str | None) -> str | None:
     return f"https://max.ru/{username}"
 
 
+def _extract_member_user_id(payload) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    nested_candidates = [
+        payload,
+        payload.get("user") if isinstance(payload.get("user"), dict) else None,
+        payload.get("member") if isinstance(payload.get("member"), dict) else None,
+        payload.get("participant") if isinstance(payload.get("participant"), dict) else None,
+        payload.get("profile") if isinstance(payload.get("profile"), dict) else None,
+    ]
+    for candidate in nested_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        value = candidate.get("user_id") or candidate.get("id")
+        if value is not None and str(value).strip():
+            return str(value)
+    return None
+
+
+def _member_is_admin(payload) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    nested_candidates = [
+        payload,
+        payload.get("user") if isinstance(payload.get("user"), dict) else None,
+        payload.get("member") if isinstance(payload.get("member"), dict) else None,
+        payload.get("participant") if isinstance(payload.get("participant"), dict) else None,
+        payload.get("permissions") if isinstance(payload.get("permissions"), dict) else None,
+    ]
+    for candidate in nested_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        role_values = [
+            candidate.get("role"),
+            candidate.get("member_role"),
+            candidate.get("status"),
+            candidate.get("type"),
+        ]
+        role_text = " ".join(str(value).lower() for value in role_values if value)
+        if any(flag in role_text for flag in ("admin", "owner", "creator", "moderator")):
+            return True
+        for key in (
+            "is_admin",
+            "is_owner",
+            "admin",
+            "owner",
+            "creator",
+            "can_delete_messages",
+            "can_delete_all_messages",
+            "can_moderate",
+            "can_manage",
+        ):
+            if candidate.get(key):
+                return True
+    return False
+
+
 def get_chat_admin_ids(chat_id: str) -> set[str]:
     if not BOT_TOKEN or not chat_id:
         return set()
@@ -621,18 +678,24 @@ def get_chat_admin_ids(chat_id: str) -> set[str]:
             admins: set[str] = set()
             if isinstance(data, list):
                 for item in data:
-                    user = item.get("user") if isinstance(item, dict) else None
-                    candidate = (user or item or {}).get("user_id") or (user or item or {}).get("id")
+                    candidate = _extract_member_user_id(item)
                     if candidate is not None:
-                        admins.add(str(candidate))
+                        admins.add(candidate)
             elif isinstance(data, dict):
-                members = data.get("members") or data.get("participants") or []
+                direct_candidate = _extract_member_user_id(data)
+                if direct_candidate and _member_is_admin(data):
+                    admins.add(direct_candidate)
+                members = (
+                    data.get("members")
+                    or data.get("participants")
+                    or data.get("admins")
+                    or data.get("items")
+                    or []
+                )
                 for item in members:
-                    role = str(item.get("role") or item.get("member_role") or "").lower()
-                    user = item.get("user") if isinstance(item, dict) else None
-                    candidate = (user or item or {}).get("user_id") or (user or item or {}).get("id")
-                    if candidate is not None and ("admin" in role or "owner" in role):
-                        admins.add(str(candidate))
+                    candidate = _extract_member_user_id(item)
+                    if candidate is not None and _member_is_admin(item):
+                        admins.add(candidate)
             if admins:
                 return admins
         except Exception:
