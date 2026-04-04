@@ -16,7 +16,26 @@ from werkzeug.utils import secure_filename
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(__file__)
-DATA_DIR = os.getenv("COMMENTS_DATA_DIR", os.path.join(os.path.expanduser("~"), "MAXCommentBotData"))
+DEFAULT_DATA_ROOT = os.getenv("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+
+
+def resolve_data_dir() -> str:
+    candidates = []
+    configured = (os.getenv("COMMENTS_DATA_DIR") or "").strip()
+    if configured:
+        candidates.append(configured)
+    candidates.append(os.path.join(DEFAULT_DATA_ROOT, "MAXCommentBotData"))
+    candidates.append(os.path.join(BASE_DIR, "persistent_data"))
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            return candidate
+        except OSError:
+            continue
+    return os.path.join(BASE_DIR, "persistent_data")
+
+
+DATA_DIR = resolve_data_dir()
 LEGACY_DB_PATH = os.path.join(BASE_DIR, "comments.db")
 LEGACY_STORE_DB_PATH = os.path.join(BASE_DIR, "comment_store.db")
 LEGACY_UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
@@ -263,20 +282,20 @@ def restore_store_archive_if_needed():
 
     with BACKUP_LOCK:
         try:
-            os.makedirs(BASE_DIR, exist_ok=True)
+            os.makedirs(DATA_DIR, exist_ok=True)
             with zipfile.ZipFile(STORE_ARCHIVE_PATH, "r") as archive:
                 members = archive.namelist()
                 if "comments.db" in members:
-                    archive.extract("comments.db", BASE_DIR)
+                    archive.extract("comments.db", DATA_DIR)
                 if "comments.db-wal" in members:
-                    archive.extract("comments.db-wal", BASE_DIR)
+                    archive.extract("comments.db-wal", DATA_DIR)
                 if "comments.db-shm" in members:
-                    archive.extract("comments.db-shm", BASE_DIR)
+                    archive.extract("comments.db-shm", DATA_DIR)
                 upload_members = [name for name in members if name.startswith("uploads/")]
                 if upload_members:
                     os.makedirs(UPLOAD_DIR, exist_ok=True)
                     for member in upload_members:
-                        archive.extract(member, BASE_DIR)
+                        archive.extract(member, DATA_DIR)
             return True
         except Exception as error:
             print(f"Не удалось восстановить данные из {STORE_ARCHIVE_PATH}: {error}")
@@ -327,7 +346,7 @@ def create_backup(reason: str = "manual") -> str | None:
                     for root, _, files in os.walk(UPLOAD_DIR):
                         for file_name in files:
                             file_path = os.path.join(root, file_name)
-                            rel_path = os.path.relpath(file_path, BASE_DIR)
+                            rel_path = os.path.relpath(file_path, DATA_DIR)
                             archive.write(file_path, arcname=rel_path)
                 archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             prune_backups()
@@ -363,7 +382,7 @@ def update_store_archive(reason: str = "sync") -> str | None:
                     for root, _, files in os.walk(UPLOAD_DIR):
                         for file_name in files:
                             file_path = os.path.join(root, file_name)
-                            rel_path = os.path.relpath(file_path, BASE_DIR)
+                            rel_path = os.path.relpath(file_path, DATA_DIR)
                             archive.write(file_path, arcname=rel_path)
                 archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             os.replace(temp_archive_path, STORE_ARCHIVE_PATH)
@@ -827,11 +846,15 @@ def send_reply_notification(target_user_id: str, actor_name: str, actor_comment:
         ],
     }
 
+    # ИСПРАВЛЕНО: убран access_token из URL, добавлен заголовок Authorization
     try:
         req = Request(
-            url=f"https://botapi.max.ru/messages?access_token={BOT_TOKEN}&user_id={target_user_id}",
+            url=f"https://botapi.max.ru/messages?user_id={target_user_id}",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": BOT_TOKEN
+            },
             method="POST",
         )
         with urlopen(req, timeout=10) as response:
@@ -880,11 +903,15 @@ def refresh_post_button(post_id: str):
         "attachments": attachments,
     }
 
+    # ИСПРАВЛЕНО: убран access_token из URL, message_id перенесён в путь, добавлен заголовок Authorization
     try:
         req = Request(
-            url=f"https://botapi.max.ru/messages?access_token={BOT_TOKEN}&message_id={target_message_id}",
+            url=f"https://botapi.max.ru/messages/{target_message_id}",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": BOT_TOKEN
+            },
             method="PUT",
         )
         with urlopen(req, timeout=10) as response:
@@ -3062,6 +3089,7 @@ def request_too_large(_error):
     return jsonify({"error": "Файл слишком большой для загрузки"}), 413
 
 
+migrate_legacy_storage()
 restore_store_db_if_needed()
 restore_store_archive_if_needed()
 init_db()
