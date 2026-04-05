@@ -1,5 +1,5 @@
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hmac
 import hashlib
 import json
@@ -1018,6 +1018,214 @@ def list_channels() -> list[dict]:
         }
         for row in rows
     ]
+
+
+def normalize_stats_period(raw_period: str | None) -> str:
+    value = str(raw_period or "").strip().lower()
+    if value in {"month", "месяц", "monthly", "30d", "30"}:
+        return "month"
+    return "week"
+
+
+def _safe_post_label(post_row: sqlite3.Row | dict) -> str:
+    post_text = str((post_row.get("post_text") if isinstance(post_row, dict) else post_row["post_text"]) or "").strip()
+    message_text = str((post_row.get("message_text") if isinstance(post_row, dict) else post_row["message_text"]) or "").strip()
+    source_post_id = str((post_row.get("source_post_id") if isinstance(post_row, dict) else post_row["source_post_id"]) or "").strip()
+    label = post_text or message_text or source_post_id or "Пост без текста"
+    return " ".join(label.split())[:80]
+
+
+def get_channel_stats(chat_id: str | None = None, period: str = "week") -> dict:
+    normalized_chat_id = str(chat_id or "").strip()
+    normalized_period = normalize_stats_period(period)
+    days = 30 if normalized_period == "month" else 7
+    now = datetime.now(timezone.utc)
+    since_dt = now - timedelta(days=days)
+    since_iso = since_dt.isoformat()
+    conn = get_db_connection()
+
+    if normalized_chat_id:
+        channel_filter = " AND posts.source_chat_id = ?"
+        channel_params = [normalized_chat_id]
+        channel = get_channel_info(normalized_chat_id) or {
+            "chat_id": normalized_chat_id,
+            "title": normalized_chat_id,
+            "avatar_url": "",
+            "is_blocked": False,
+        }
+    else:
+        channel_filter = ""
+        channel_params = []
+        channel = None
+
+    posts_row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS posts_count,
+            SUM(CASE WHEN counter_enabled = 1 THEN 1 ELSE 0 END) AS counter_enabled_posts_count
+        FROM posts
+        WHERE created_at >= ? {channel_filter}
+        """,
+        [since_iso, *channel_params],
+    ).fetchone()
+
+    comments_row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS comments_count,
+            COUNT(DISTINCT comments.user_id) AS unique_commenters,
+            SUM(CASE WHEN comments.parent_id IS NOT NULL THEN 1 ELSE 0 END) AS replies_count,
+            SUM(CASE WHEN TRIM(COALESCE(comments.media_path, '')) <> '' THEN 1 ELSE 0 END) AS media_comments_count,
+            SUM(CASE WHEN comments.author_type = 'channel' THEN 1 ELSE 0 END) AS channel_comments_count
+        FROM comments
+        JOIN posts ON posts.post_id = comments.post_id
+        WHERE comments.created_at >= ? {channel_filter}
+        """,
+        [since_iso, *channel_params],
+    ).fetchone()
+
+    lifetime_row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS comments_total,
+            COUNT(DISTINCT comments.user_id) AS commenters_total
+        FROM comments
+        JOIN posts ON posts.post_id = comments.post_id
+        WHERE 1 = 1 {channel_filter}
+        """,
+        channel_params,
+    ).fetchone()
+
+    active_channels_row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT source_chat_id) AS active_channels
+        FROM posts
+        WHERE created_at >= ? AND TRIM(COALESCE(source_chat_id, '')) <> ''
+        """,
+        (since_iso,),
+    ).fetchone()
+
+    top_posts_rows = conn.execute(
+        f"""
+        SELECT
+            posts.post_id,
+            posts.source_post_id,
+            posts.post_text,
+            posts.message_text,
+            COUNT(comments.id) AS comments_count,
+            MAX(comments.created_at) AS last_comment_at
+        FROM posts
+        LEFT JOIN comments
+            ON comments.post_id = posts.post_id
+           AND comments.created_at >= ?
+        WHERE 1 = 1 {channel_filter}
+        GROUP BY posts.post_id, posts.source_post_id, posts.post_text, posts.message_text
+        HAVING comments_count > 0
+        ORDER BY comments_count DESC, last_comment_at DESC
+        LIMIT 5
+        """,
+        [since_iso, *channel_params],
+    ).fetchall()
+
+    top_commenters_rows = conn.execute(
+        f"""
+        SELECT
+            comments.user_id,
+            comments.username,
+            comments.author_type,
+            COUNT(*) AS comments_count,
+            MAX(comments.created_at) AS last_comment_at
+        FROM comments
+        JOIN posts ON posts.post_id = comments.post_id
+        WHERE comments.created_at >= ? {channel_filter}
+        GROUP BY comments.user_id, comments.username, comments.author_type
+        ORDER BY comments_count DESC, last_comment_at DESC
+        LIMIT 5
+        """,
+        [since_iso, *channel_params],
+    ).fetchall()
+
+    activity_rows = conn.execute(
+        f"""
+        SELECT
+            SUBSTR(comments.created_at, 1, 10) AS day,
+            COUNT(*) AS comments_count
+        FROM comments
+        JOIN posts ON posts.post_id = comments.post_id
+        WHERE comments.created_at >= ? {channel_filter}
+        GROUP BY SUBSTR(comments.created_at, 1, 10)
+        ORDER BY day ASC
+        """,
+        [since_iso, *channel_params],
+    ).fetchall()
+    conn.close()
+
+    posts_count = int((posts_row["posts_count"] or 0) if posts_row else 0)
+    comments_count = int((comments_row["comments_count"] or 0) if comments_row else 0)
+    unique_commenters = int((comments_row["unique_commenters"] or 0) if comments_row else 0)
+    replies_count = int((comments_row["replies_count"] or 0) if comments_row else 0)
+    media_comments_count = int((comments_row["media_comments_count"] or 0) if comments_row else 0)
+    channel_comments_count = int((comments_row["channel_comments_count"] or 0) if comments_row else 0)
+    counter_enabled_posts_count = int((posts_row["counter_enabled_posts_count"] or 0) if posts_row else 0)
+    comments_total = int((lifetime_row["comments_total"] or 0) if lifetime_row else 0)
+    commenters_total = int((lifetime_row["commenters_total"] or 0) if lifetime_row else 0)
+    active_channels = int((active_channels_row["active_channels"] or 0) if active_channels_row else 0)
+
+    activity_map = {str(row["day"]): int(row["comments_count"] or 0) for row in activity_rows}
+    activity_by_day = []
+    for offset in range(days):
+        day = (since_dt + timedelta(days=offset)).date().isoformat()
+        activity_by_day.append({"day": day, "comments_count": activity_map.get(day, 0)})
+
+    top_posts = [
+        {
+            "post_id": row["post_id"],
+            "source_post_id": row["source_post_id"],
+            "label": _safe_post_label(row),
+            "comments_count": int(row["comments_count"] or 0),
+            "last_comment_at": row["last_comment_at"] or "",
+        }
+        for row in top_posts_rows
+    ]
+    top_commenters = [
+        {
+            "user_id": row["user_id"],
+            "username": row["username"] or "Пользователь",
+            "author_type": row["author_type"] or "user",
+            "comments_count": int(row["comments_count"] or 0),
+            "last_comment_at": row["last_comment_at"] or "",
+        }
+        for row in top_commenters_rows
+    ]
+
+    avg_comments_per_post = round(comments_count / posts_count, 2) if posts_count else 0.0
+    active_days = sum(1 for item in activity_by_day if item["comments_count"] > 0)
+
+    return {
+        "period": normalized_period,
+        "days": days,
+        "scope": "channel" if normalized_chat_id else "all",
+        "generated_at": now.isoformat(),
+        "since": since_dt.isoformat(),
+        "channel": channel,
+        "summary": {
+            "posts_count": posts_count,
+            "counter_enabled_posts_count": counter_enabled_posts_count,
+            "comments_count": comments_count,
+            "comments_total": comments_total,
+            "unique_commenters": unique_commenters,
+            "commenters_total": commenters_total,
+            "replies_count": replies_count,
+            "media_comments_count": media_comments_count,
+            "channel_comments_count": channel_comments_count,
+            "avg_comments_per_post": avg_comments_per_post,
+            "active_days": active_days,
+            "active_channels": active_channels,
+        },
+        "top_posts": top_posts,
+        "top_commenters": top_commenters,
+        "activity_by_day": activity_by_day,
+    }
 
 
 def set_channel_block(chat_id: str, is_blocked: bool):
@@ -3748,6 +3956,15 @@ def admin_channels():
     if not require_sync_secret():
         return jsonify({"error": "forbidden"}), 403
     return jsonify({"channels": list_channels()})
+
+
+@app.route("/api/admin/stats")
+def admin_stats():
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    chat_id = str(request.args.get("chat_id") or "").strip()
+    period = normalize_stats_period(request.args.get("period"))
+    return jsonify(get_channel_stats(chat_id=chat_id or None, period=period))
 
 
 @app.route("/api/admin/post/<path:post_id>")
