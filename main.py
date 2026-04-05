@@ -4020,6 +4020,78 @@ def register_post():
     return jsonify({"status": "success"})
 
 
+def register_post_safe():
+    payload = request.get_json(silent=True) or {}
+    try:
+        post_id = normalize_post_id(payload.get("post_id"))
+        source_post_id = str(payload.get("source_post_id") or "").strip()[:256]
+        source_chat_id = str(payload.get("source_chat_id") or "").strip()[:256]
+        button_message_id = str(payload.get("button_message_id") or "").strip()[:256]
+        counter_enabled = 1 if payload.get("counter_enabled", True) else 0
+        post_text = (payload.get("post_text") or "").strip()[:4000]
+        message_text = (payload.get("message_text") or "").strip()[:4000]
+        channel_title = (payload.get("channel_title") or "").strip()[:255]
+        channel_avatar_url = (payload.get("channel_avatar_url") or "").strip()[:1000]
+        attachments_json = payload.get("attachments") or []
+        if not isinstance(attachments_json, list):
+            attachments_json = []
+        if not post_id:
+            return jsonify({"error": "Не переданы данные поста"}), 400
+
+        if source_chat_id:
+            try:
+                chat_info = fetch_chat_info(source_chat_id) if not channel_title else None
+                upsert_channel(
+                    source_chat_id,
+                    title=channel_title or (chat_info or {}).get("title", ""),
+                    avatar_url=channel_avatar_url or (chat_info or {}).get("avatar_url", ""),
+                )
+                channel = get_channel_info(source_chat_id)
+                if channel and channel.get("is_blocked"):
+                    return jsonify({"error": "Канал заблокирован"}), 403
+            except Exception as channel_error:
+                print(f"Ошибка подготовки канала {source_chat_id[:64]} при регистрации поста {post_id[:64]}: {channel_error}")
+
+        conn = get_db_connection()
+        conn.execute(
+            """
+            INSERT INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(post_id) DO UPDATE SET
+                source_post_id = excluded.source_post_id,
+                source_chat_id = excluded.source_chat_id,
+                button_message_id = excluded.button_message_id,
+                counter_enabled = excluded.counter_enabled,
+                post_text = excluded.post_text,
+                message_text = excluded.message_text,
+                attachments_json = excluded.attachments_json
+            """,
+            (
+                post_id,
+                source_post_id,
+                source_chat_id,
+                button_message_id,
+                counter_enabled,
+                post_text,
+                message_text,
+                json.dumps(attachments_json, ensure_ascii=False),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        sync_store_db("post-upsert")
+        update_store_archive("post-upsert")
+        create_backup("post-upsert")
+        return jsonify({"status": "success"})
+    except Exception as error:
+        app.logger.exception("register_post failed")
+        return jsonify({"error": "register_post_failed", "details": str(error)[:500]}), 500
+
+
+app.view_functions["register_post"] = register_post_safe
+
+
 @app.route("/api/comments/<path:post_id>")
 def get_comments_by_post(post_id):
     normalized_post_id = resolve_post_id(post_id)
