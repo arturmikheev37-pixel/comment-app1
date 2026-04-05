@@ -10,7 +10,7 @@ import zipfile
 from urllib.parse import parse_qsl, quote
 from urllib.request import Request, urlopen
 
-from flask import Flask, jsonify, render_template_string, request, send_from_directory
+from flask import Flask, jsonify, render_template_string, request, send_file, send_from_directory
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -49,6 +49,7 @@ BACKUP_RETENTION = max(3, int(os.getenv("COMMENTS_BACKUP_RETENTION", "20")))
 STORE_ARCHIVE_PATH = os.getenv("COMMENTS_STORE_ARCHIVE", os.path.join(DATA_DIR, "comment_store.zip"))
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "f9LHodD0cOIdrNPjh3CWiZlW8bj-DhNpjF6VBTWDQP66-wijDIChpbtLyNZeZOtubmx3thZhMxQe7j8oXnCq").strip()
 BOT_USERNAME = os.getenv("MAX_BOT_USERNAME", "id250300578953_1_bot").strip()
+SYNC_SECRET = (os.getenv("MAX_SYNC_SECRET") or "").strip()
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v"}
 ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
@@ -70,13 +71,37 @@ def get_db_connection():
 
 def migrate_legacy_storage():
     os.makedirs(DATA_DIR, exist_ok=True)
+
+    def db_row_count(path: str) -> int:
+        if not os.path.exists(path):
+            return 0
+        try:
+            conn = sqlite3.connect(path)
+            row = conn.execute("SELECT COUNT(*) FROM comments").fetchone()
+            conn.close()
+            return int(row[0] if row else 0)
+        except sqlite3.Error:
+            return 0
+
     migrations = [
         (LEGACY_DB_PATH, DB_PATH),
         (LEGACY_STORE_DB_PATH, STORE_DB_PATH),
         (LEGACY_STORE_ARCHIVE_PATH, STORE_ARCHIVE_PATH),
     ]
     for source, target in migrations:
-        if os.path.exists(source) and not os.path.exists(target):
+        source_exists = os.path.exists(source)
+        target_exists = os.path.exists(target)
+        if not source_exists:
+            continue
+        if source.endswith(".db"):
+            source_count = db_row_count(source)
+            target_count = db_row_count(target)
+            should_replace = (not target_exists) or (source_count > 0 and target_count == 0)
+        else:
+            source_size = os.path.getsize(source) if source_exists else 0
+            target_size = os.path.getsize(target) if target_exists else 0
+            should_replace = (not target_exists) or (source_size > target_size)
+        if should_replace:
             try:
                 os.replace(source, target)
             except OSError:
@@ -302,6 +327,47 @@ def restore_store_archive_if_needed():
             return False
 
 
+def restore_latest_backup_if_needed():
+    if count_comments_in_db(DB_PATH) > 0:
+        return False
+    if not os.path.isdir(BACKUP_DIR):
+        return False
+
+    backup_paths = []
+    for name in os.listdir(BACKUP_DIR):
+        if name.startswith("comments-backup-") and name.endswith(".zip"):
+            path = os.path.join(BACKUP_DIR, name)
+            if os.path.isfile(path):
+                backup_paths.append(path)
+    backup_paths.sort(key=lambda item: os.path.getmtime(item), reverse=True)
+    if not backup_paths:
+        return False
+
+    with BACKUP_LOCK:
+        for archive_path in backup_paths:
+            try:
+                os.makedirs(DATA_DIR, exist_ok=True)
+                with zipfile.ZipFile(archive_path, "r") as archive:
+                    members = archive.namelist()
+                    if "comments.db" in members:
+                        archive.extract("comments.db", DATA_DIR)
+                    if "comments.db-wal" in members:
+                        archive.extract("comments.db-wal", DATA_DIR)
+                    if "comments.db-shm" in members:
+                        archive.extract("comments.db-shm", DATA_DIR)
+                    upload_members = [name for name in members if name.startswith("uploads/")]
+                    if upload_members:
+                        os.makedirs(UPLOAD_DIR, exist_ok=True)
+                        for member in upload_members:
+                            archive.extract(member, DATA_DIR)
+                if count_comments_in_db(DB_PATH) > 0:
+                    return True
+            except Exception as error:
+                print(f"РќРµ СѓРґР°Р»РѕСЃСЊ РІРѕСЃСЃС‚Р°РЅРѕРІРёС‚СЊ backup {archive_path}: {error}")
+                continue
+    return False
+
+
 def prune_backups():
     entries = []
     for name in os.listdir(BACKUP_DIR):
@@ -395,6 +461,41 @@ def update_store_archive(reason: str = "sync") -> str | None:
             except OSError:
                 pass
             return None
+
+
+def require_sync_secret() -> bool:
+    if not SYNC_SECRET:
+        return False
+    return request.headers.get("X-Sync-Secret", "").strip() == SYNC_SECRET
+
+
+def import_store_archive(archive_path: str) -> bool:
+    if not os.path.exists(archive_path):
+        return False
+
+    with BACKUP_LOCK:
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                members = archive.namelist()
+                if "comments.db" in members:
+                    archive.extract("comments.db", DATA_DIR)
+                if "comments.db-wal" in members:
+                    archive.extract("comments.db-wal", DATA_DIR)
+                if "comments.db-shm" in members:
+                    archive.extract("comments.db-shm", DATA_DIR)
+                upload_members = [name for name in members if name.startswith("uploads/")]
+                if upload_members:
+                    os.makedirs(UPLOAD_DIR, exist_ok=True)
+                    for member in upload_members:
+                        archive.extract(member, DATA_DIR)
+            sync_store_db("sync-import")
+            update_store_archive("sync-import")
+            create_backup("sync-import")
+            return True
+        except Exception as error:
+            print(f"Не удалось импортировать store archive {archive_path}: {error}")
+            return False
 
 
 def normalize_post_id(raw_post_id: str | None) -> str:
@@ -1894,6 +1995,29 @@ HTML_TEMPLATE = """
             status.className = "status " + type;
         }
 
+        function getConsentStorageKey() {
+            const userId = currentUser && currentUser.user_id ? String(currentUser.user_id) : "anonymous";
+            return `max-comments-consent:${userId}`;
+        }
+
+        function syncConsentCache(value) {
+            try {
+                if (value) {
+                    window.localStorage.setItem(getConsentStorageKey(), "1");
+                } else {
+                    window.localStorage.removeItem(getConsentStorageKey());
+                }
+            } catch (error) {}
+        }
+
+        function hasCachedConsent() {
+            try {
+                return window.localStorage.getItem(getConsentStorageKey()) === "1";
+            } catch (error) {
+                return false;
+            }
+        }
+
         function buildMenuButton(label, iconPath, action, extraClass = "") {
             return `<button type="button" class="${extraClass}" onclick="${action}"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true">${iconPath}</svg><span>${label}</span></button>`;
         }
@@ -1932,6 +2056,7 @@ HTML_TEMPLATE = """
                         notifications_enabled: Boolean(data.settings.notifications_enabled),
                         consent_accepted: Boolean(data.settings.consent_accepted),
                     };
+                    syncConsentCache(notificationSettings.consent_accepted);
                     updateNotifyToggle();
                 }
             } catch (error) {
@@ -1964,7 +2089,7 @@ HTML_TEMPLATE = """
         }
 
         function hasConsent() {
-            return Boolean(notificationSettings && notificationSettings.consent_accepted);
+            return Boolean((notificationSettings && notificationSettings.consent_accepted) || hasCachedConsent());
         }
 
         function openConsentModal() {
@@ -1990,6 +2115,7 @@ HTML_TEMPLATE = """
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Не удалось сохранить согласие");
                 notificationSettings.consent_accepted = Boolean(data.consent_accepted);
+                syncConsentCache(notificationSettings.consent_accepted);
             } catch (error) {
                 showStatus(error.message || "Ошибка согласия", "error");
                 return;
@@ -3061,6 +3187,40 @@ def uploads(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
+@app.route("/api/admin/export-store")
+def export_store():
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    if not os.path.exists(STORE_ARCHIVE_PATH):
+        update_store_archive("sync-export")
+    if not os.path.exists(STORE_ARCHIVE_PATH):
+        return jsonify({"error": "store archive not found"}), 404
+    return send_file(STORE_ARCHIVE_PATH, mimetype="application/zip", as_attachment=True, download_name="comment_store.zip")
+
+
+@app.route("/api/admin/import-store", methods=["POST"])
+def import_store():
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    file = request.files.get("archive")
+    if not file or not file.filename:
+        return jsonify({"error": "archive is required"}), 400
+    temp_path = STORE_ARCHIVE_PATH + ".upload"
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        file.save(temp_path)
+        os.replace(temp_path, STORE_ARCHIVE_PATH)
+        if not import_store_archive(STORE_ARCHIVE_PATH):
+            return jsonify({"error": "failed to import archive"}), 500
+        return jsonify({"status": "success", "db_comment_count": count_comments_in_db(DB_PATH)})
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
 @app.route("/health")
 def health():
     backups = []
@@ -3073,9 +3233,12 @@ def health():
     return jsonify(
         {
             "status": "ok",
+            "data_dir": DATA_DIR,
             "db_exists": os.path.exists(DB_PATH),
+            "db_comment_count": count_comments_in_db(DB_PATH),
             "store_db_exists": os.path.exists(STORE_DB_PATH),
             "store_db_path": STORE_DB_PATH,
+            "store_db_comment_count": count_comments_in_db(STORE_DB_PATH),
             "store_archive_exists": os.path.exists(STORE_ARCHIVE_PATH),
             "store_archive_path": STORE_ARCHIVE_PATH,
             "backup_dir": BACKUP_DIR,
@@ -3092,6 +3255,7 @@ def request_too_large(_error):
 migrate_legacy_storage()
 restore_store_db_if_needed()
 restore_store_archive_if_needed()
+restore_latest_backup_if_needed()
 init_db()
 sync_store_db("startup")
 update_store_archive("startup")
