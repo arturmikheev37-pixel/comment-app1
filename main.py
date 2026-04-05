@@ -233,6 +233,40 @@ def init_db():
     post_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(posts)").fetchall()}
     user_settings_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(user_settings)").fetchall()}
     channel_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(channels)").fetchall()}
+    if "channel_id" in channel_columns and "chat_id" not in channel_columns:
+        title_expr = "COALESCE(channel_name, '')" if "channel_name" in channel_columns else "''"
+        avatar_expr = "COALESCE(avatar_url, '')" if "avatar_url" in channel_columns else "''"
+        blocked_expr = "COALESCE(is_blocked, 0)" if "is_blocked" in channel_columns else "0"
+        created_expr = "COALESCE(created_at, COALESCE(added_at, ''))" if "created_at" in channel_columns else ("COALESCE(added_at, '')" if "added_at" in channel_columns else "''")
+        updated_expr = "COALESCE(updated_at, COALESCE(added_at, ''))" if "updated_at" in channel_columns else ("COALESCE(added_at, '')" if "added_at" in channel_columns else "''")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS channels_v2 (
+                chat_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT '',
+                avatar_url TEXT NOT NULL DEFAULT '',
+                is_blocked INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        cursor.execute(
+            f"""
+            INSERT OR REPLACE INTO channels_v2 (chat_id, title, avatar_url, is_blocked, created_at, updated_at)
+            SELECT
+                channel_id,
+                {title_expr},
+                {avatar_expr},
+                {blocked_expr},
+                {created_expr},
+                {updated_expr}
+            FROM channels
+            """
+        )
+        cursor.execute("DROP TABLE channels")
+        cursor.execute("ALTER TABLE channels_v2 RENAME TO channels")
+        channel_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(channels)").fetchall()}
     if "source_post_id" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN source_post_id TEXT")
     if "source_chat_id" not in post_columns:
@@ -759,16 +793,6 @@ def get_channel_info(chat_id: str) -> dict | None:
     normalized_chat_id = str(chat_id or "").strip()
     if not normalized_chat_id:
         return None
-    if source_chat_id:
-        chat_info = fetch_chat_info(source_chat_id) if not channel_title else None
-        upsert_channel(
-            source_chat_id,
-            title=channel_title or (chat_info or {}).get("title", ""),
-            avatar_url=channel_avatar_url or (chat_info or {}).get("avatar_url", ""),
-        )
-        channel = get_channel_info(source_chat_id)
-        if channel and channel.get("is_blocked"):
-            return jsonify({"error": "Канал заблокирован"}), 403
 
     conn = get_db_connection()
     row = conn.execute(
