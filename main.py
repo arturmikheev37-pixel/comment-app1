@@ -1,20 +1,16 @@
-import base64
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import hmac
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
-import tempfile
 import threading
 import uuid
 import zipfile
 from urllib.parse import parse_qsl, quote
-from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from flask import Flask, jsonify, render_template_string, request, send_file, send_from_directory
+from flask import Flask, jsonify, render_template_string, request, send_from_directory
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -53,14 +49,12 @@ BACKUP_RETENTION = max(3, int(os.getenv("COMMENTS_BACKUP_RETENTION", "20")))
 STORE_ARCHIVE_PATH = os.getenv("COMMENTS_STORE_ARCHIVE", os.path.join(DATA_DIR, "comment_store.zip"))
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "f9LHodD0cOIdrNPjh3CWiZlW8bj-DhNpjF6VBTWDQP66-wijDIChpbtLyNZeZOtubmx3thZhMxQe7j8oXnCq").strip()
 BOT_USERNAME = os.getenv("MAX_BOT_USERNAME", "id250300578953_1_bot").strip()
-DEFAULT_SYNC_SECRET = "my-super-sync-key-2026"
-SYNC_SECRET = (os.getenv("MAX_SYNC_SECRET") or DEFAULT_SYNC_SECRET).strip()
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v"}
 ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MAX_VIDEO_BYTES = 80 * 1024 * 1024
-BACKUP_LOCK = threading.RLock()
+BACKUP_LOCK = threading.Lock()
 app.config["MAX_CONTENT_LENGTH"] = MAX_VIDEO_BYTES + (2 * 1024 * 1024)
 
 
@@ -76,37 +70,13 @@ def get_db_connection():
 
 def migrate_legacy_storage():
     os.makedirs(DATA_DIR, exist_ok=True)
-
-    def db_row_count(path: str) -> int:
-        if not os.path.exists(path):
-            return 0
-        try:
-            conn = sqlite3.connect(path)
-            row = conn.execute("SELECT COUNT(*) FROM comments").fetchone()
-            conn.close()
-            return int(row[0] if row else 0)
-        except sqlite3.Error:
-            return 0
-
     migrations = [
         (LEGACY_DB_PATH, DB_PATH),
         (LEGACY_STORE_DB_PATH, STORE_DB_PATH),
         (LEGACY_STORE_ARCHIVE_PATH, STORE_ARCHIVE_PATH),
     ]
     for source, target in migrations:
-        source_exists = os.path.exists(source)
-        target_exists = os.path.exists(target)
-        if not source_exists:
-            continue
-        if source.endswith(".db"):
-            source_count = db_row_count(source)
-            target_count = db_row_count(target)
-            should_replace = (not target_exists) or (source_count > 0 and target_count == 0)
-        else:
-            source_size = os.path.getsize(source) if source_exists else 0
-            target_size = os.path.getsize(target) if target_exists else 0
-            should_replace = (not target_exists) or (source_size > target_size)
-        if should_replace:
+        if os.path.exists(source) and not os.path.exists(target):
             try:
                 os.replace(source, target)
             except OSError:
@@ -173,8 +143,6 @@ def init_db():
             post_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             username TEXT NOT NULL,
-            author_type TEXT NOT NULL DEFAULT 'user',
-            channel_chat_id TEXT,
             public_username TEXT,
             avatar_url TEXT,
             comment TEXT NOT NULL DEFAULT '',
@@ -201,31 +169,12 @@ def init_db():
         )
         """
     )
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS channels (
-            chat_id TEXT PRIMARY KEY,
-            title TEXT NOT NULL DEFAULT '',
-            avatar_url TEXT NOT NULL DEFAULT '',
-            owner_user_id TEXT NOT NULL DEFAULT '',
-            owner_username TEXT NOT NULL DEFAULT '',
-            is_blocked INTEGER NOT NULL DEFAULT 0,
-            is_deleted INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL DEFAULT ''
-        )
-        """
-    )
 
     comment_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(comments)").fetchall()}
     if "image_path" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN image_path TEXT")
     if "public_username" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN public_username TEXT")
-    if "author_type" not in comment_columns:
-        cursor.execute("ALTER TABLE comments ADD COLUMN author_type TEXT NOT NULL DEFAULT 'user'")
-    if "channel_chat_id" not in comment_columns:
-        cursor.execute("ALTER TABLE comments ADD COLUMN channel_chat_id TEXT")
     if "avatar_url" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN avatar_url TEXT")
     if "media_path" not in comment_columns:
@@ -239,41 +188,6 @@ def init_db():
 
     post_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(posts)").fetchall()}
     user_settings_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(user_settings)").fetchall()}
-    channel_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(channels)").fetchall()}
-    if "channel_id" in channel_columns and "chat_id" not in channel_columns:
-        title_expr = "COALESCE(channel_name, '')" if "channel_name" in channel_columns else "''"
-        avatar_expr = "COALESCE(avatar_url, '')" if "avatar_url" in channel_columns else "''"
-        blocked_expr = "COALESCE(is_blocked, 0)" if "is_blocked" in channel_columns else "0"
-        created_expr = "COALESCE(created_at, COALESCE(added_at, ''))" if "created_at" in channel_columns else ("COALESCE(added_at, '')" if "added_at" in channel_columns else "''")
-        updated_expr = "COALESCE(updated_at, COALESCE(added_at, ''))" if "updated_at" in channel_columns else ("COALESCE(added_at, '')" if "added_at" in channel_columns else "''")
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS channels_v2 (
-                chat_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL DEFAULT '',
-                avatar_url TEXT NOT NULL DEFAULT '',
-                is_blocked INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL DEFAULT ''
-            )
-            """
-        )
-        cursor.execute(
-            f"""
-            INSERT OR REPLACE INTO channels_v2 (chat_id, title, avatar_url, is_blocked, created_at, updated_at)
-            SELECT
-                channel_id,
-                {title_expr},
-                {avatar_expr},
-                {blocked_expr},
-                {created_expr},
-                {updated_expr}
-            FROM channels
-            """
-        )
-        cursor.execute("DROP TABLE channels")
-        cursor.execute("ALTER TABLE channels_v2 RENAME TO channels")
-        channel_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(channels)").fetchall()}
     if "source_post_id" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN source_post_id TEXT")
     if "source_chat_id" not in post_columns:
@@ -294,31 +208,11 @@ def init_db():
         cursor.execute("ALTER TABLE user_settings ADD COLUMN avatar_url TEXT")
     if "consent_accepted" not in user_settings_columns:
         cursor.execute("ALTER TABLE user_settings ADD COLUMN consent_accepted INTEGER NOT NULL DEFAULT 0")
-    if "avatar_url" not in channel_columns:
-        cursor.execute("ALTER TABLE channels ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''")
-    if "owner_user_id" not in channel_columns:
-        cursor.execute("ALTER TABLE channels ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''")
-    if "owner_username" not in channel_columns:
-        cursor.execute("ALTER TABLE channels ADD COLUMN owner_username TEXT NOT NULL DEFAULT ''")
-    if "is_blocked" not in channel_columns:
-        cursor.execute("ALTER TABLE channels ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0")
-    if "is_deleted" not in channel_columns:
-        cursor.execute("ALTER TABLE channels ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
-    if "created_at" not in channel_columns:
-        cursor.execute("ALTER TABLE channels ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
-    if "updated_at" not in channel_columns:
-        cursor.execute("ALTER TABLE channels ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
 
     cursor.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_comments_post_created
         ON comments (post_id, created_at DESC)
-        """
-    )
-    cursor.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_posts_source_chat
-        ON posts (source_chat_id, created_at DESC)
         """
     )
     conn.commit()
@@ -335,28 +229,6 @@ def count_comments_in_db(db_path: str) -> int:
         return int(row[0] if row else 0)
     except sqlite3.Error:
         return 0
-
-
-def count_comments_in_archive(archive_path: str) -> int:
-    if not os.path.exists(archive_path):
-        return 0
-    temp_dir = os.path.join(DATA_DIR, f"_archive_check_{uuid.uuid4().hex}")
-    try:
-        os.makedirs(temp_dir, exist_ok=True)
-        with zipfile.ZipFile(archive_path, "r") as archive:
-            members = archive.namelist()
-            if "comments.db" not in members:
-                return 0
-            archive.extract("comments.db", temp_dir)
-            if "comments.db-wal" in members:
-                archive.extract("comments.db-wal", temp_dir)
-            if "comments.db-shm" in members:
-                archive.extract("comments.db-shm", temp_dir)
-        return count_comments_in_db(os.path.join(temp_dir, "comments.db"))
-    except Exception:
-        return 0
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def sync_store_db(reason: str = "sync") -> str | None:
@@ -430,47 +302,6 @@ def restore_store_archive_if_needed():
             return False
 
 
-def restore_latest_backup_if_needed():
-    if count_comments_in_db(DB_PATH) > 0:
-        return False
-    if not os.path.isdir(BACKUP_DIR):
-        return False
-
-    backup_paths = []
-    for name in os.listdir(BACKUP_DIR):
-        if name.startswith("comments-backup-") and name.endswith(".zip"):
-            path = os.path.join(BACKUP_DIR, name)
-            if os.path.isfile(path):
-                backup_paths.append(path)
-    backup_paths.sort(key=lambda item: os.path.getmtime(item), reverse=True)
-    if not backup_paths:
-        return False
-
-    with BACKUP_LOCK:
-        for archive_path in backup_paths:
-            try:
-                os.makedirs(DATA_DIR, exist_ok=True)
-                with zipfile.ZipFile(archive_path, "r") as archive:
-                    members = archive.namelist()
-                    if "comments.db" in members:
-                        archive.extract("comments.db", DATA_DIR)
-                    if "comments.db-wal" in members:
-                        archive.extract("comments.db-wal", DATA_DIR)
-                    if "comments.db-shm" in members:
-                        archive.extract("comments.db-shm", DATA_DIR)
-                    upload_members = [name for name in members if name.startswith("uploads/")]
-                    if upload_members:
-                        os.makedirs(UPLOAD_DIR, exist_ok=True)
-                        for member in upload_members:
-                            archive.extract(member, DATA_DIR)
-                if count_comments_in_db(DB_PATH) > 0:
-                    return True
-            except Exception as error:
-                print(f"РќРµ СѓРґР°Р»РѕСЃСЊ РІРѕСЃСЃС‚Р°РЅРѕРІРёС‚СЊ backup {archive_path}: {error}")
-                continue
-    return False
-
-
 def prune_backups():
     entries = []
     for name in os.listdir(BACKUP_DIR):
@@ -497,16 +328,20 @@ def create_backup(reason: str = "manual") -> str | None:
 
     with BACKUP_LOCK:
         try:
-            sync_store_db(f"{reason}-backup")
-            source_db_path = STORE_DB_PATH if count_comments_in_db(STORE_DB_PATH) > 0 else DB_PATH
+            wal_path = DB_PATH + "-wal"
+            shm_path = DB_PATH + "-shm"
             manifest = {
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "reason": reason,
-                "db_path": source_db_path,
+                "db_path": DB_PATH,
                 "upload_dir": UPLOAD_DIR,
             }
             with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.write(source_db_path, arcname="comments.db")
+                archive.write(DB_PATH, arcname="comments.db")
+                if os.path.exists(wal_path):
+                    archive.write(wal_path, arcname="comments.db-wal")
+                if os.path.exists(shm_path):
+                    archive.write(shm_path, arcname="comments.db-shm")
                 if os.path.isdir(UPLOAD_DIR):
                     for root, _, files in os.walk(UPLOAD_DIR):
                         for file_name in files:
@@ -528,17 +363,21 @@ def update_store_archive(reason: str = "sync") -> str | None:
     temp_archive_path = STORE_ARCHIVE_PATH + ".tmp"
     with BACKUP_LOCK:
         try:
-            sync_store_db(f"{reason}-archive")
-            source_db_path = STORE_DB_PATH if count_comments_in_db(STORE_DB_PATH) > 0 else DB_PATH
+            wal_path = DB_PATH + "-wal"
+            shm_path = DB_PATH + "-shm"
             manifest = {
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "reason": reason,
-                "db_path": os.path.basename(source_db_path),
+                "db_path": os.path.basename(DB_PATH),
                 "uploads_dir": os.path.basename(UPLOAD_DIR),
                 "archive_type": "comment_store",
             }
             with zipfile.ZipFile(temp_archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.write(source_db_path, arcname="comments.db")
+                archive.write(DB_PATH, arcname="comments.db")
+                if os.path.exists(wal_path):
+                    archive.write(wal_path, arcname="comments.db-wal")
+                if os.path.exists(shm_path):
+                    archive.write(shm_path, arcname="comments.db-shm")
                 if os.path.isdir(UPLOAD_DIR):
                     for root, _, files in os.walk(UPLOAD_DIR):
                         for file_name in files:
@@ -558,96 +397,8 @@ def update_store_archive(reason: str = "sync") -> str | None:
             return None
 
 
-def require_sync_secret() -> bool:
-    if not SYNC_SECRET:
-        return False
-    return request.headers.get("X-Sync-Secret", "").strip() == SYNC_SECRET
-
-
-def import_store_archive(archive_path: str) -> bool:
-    if not os.path.exists(archive_path):
-        return False
-
-    with BACKUP_LOCK:
-        try:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            with zipfile.ZipFile(archive_path, "r") as archive:
-                members = archive.namelist()
-                if "comments.db" in members:
-                    archive.extract("comments.db", DATA_DIR)
-                if "comments.db-wal" in members:
-                    archive.extract("comments.db-wal", DATA_DIR)
-                if "comments.db-shm" in members:
-                    archive.extract("comments.db-shm", DATA_DIR)
-                upload_members = [name for name in members if name.startswith("uploads/")]
-                if upload_members:
-                    os.makedirs(UPLOAD_DIR, exist_ok=True)
-                    for member in upload_members:
-                        archive.extract(member, DATA_DIR)
-            sync_store_db("sync-import")
-            update_store_archive("sync-import")
-            create_backup("sync-import")
-            return True
-        except Exception as error:
-            print(f"Не удалось импортировать store archive {archive_path}: {error}")
-            return False
-
-
 def normalize_post_id(raw_post_id: str | None) -> str:
     return (raw_post_id or "").strip()[:128]
-
-
-def encode_post_payload(raw_post_id: str | None) -> str:
-    normalized = normalize_post_id(raw_post_id)
-    if not normalized:
-        return ""
-    return base64.urlsafe_b64encode(normalized.encode("utf-8")).decode("ascii").rstrip("=")[:128]
-
-
-def decode_post_payload(raw_post_id: str | None) -> str:
-    normalized = normalize_post_id(raw_post_id)
-    if not normalized or normalized.startswith("mid."):
-        return normalized if normalized.startswith("mid.") else ""
-    try:
-        padding = "=" * (-len(normalized) % 4)
-        decoded = base64.urlsafe_b64decode((normalized + padding).encode("ascii")).decode("utf-8")
-    except Exception:
-        return ""
-    return normalize_post_id(decoded)
-
-
-def get_post_id_candidates(raw_post_id: str | None) -> list[str]:
-    normalized = normalize_post_id(raw_post_id)
-    if not normalized:
-        return []
-    candidates: list[str] = []
-
-    def add(candidate: str | None):
-        candidate = normalize_post_id(candidate)
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
-
-    add(normalized)
-    decoded = decode_post_payload(normalized)
-    add(decoded)
-    if normalized.startswith("mid."):
-        add(encode_post_payload(normalized))
-    if decoded.startswith("mid."):
-        add(encode_post_payload(decoded))
-    return candidates
-
-
-def get_preferred_post_storage_id(raw_post_id: str | None) -> str:
-    normalized = normalize_post_id(raw_post_id)
-    if not normalized:
-        return ""
-    if normalized.startswith("mid."):
-        encoded = encode_post_payload(normalized)
-        return encoded or normalized
-    decoded = decode_post_payload(normalized)
-    if decoded.startswith("mid."):
-        return normalized
-    return normalized
 
 
 def normalize_comment(raw_comment: str | None) -> str:
@@ -827,8 +578,6 @@ def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> d
         "post_id": row["post_id"],
         "user_id": row["user_id"],
         "username": row["username"],
-        "author_type": row["author_type"] if "author_type" in row.keys() else "user",
-        "channel_chat_id": row["channel_chat_id"] if "channel_chat_id" in row.keys() else "",
         "public_username": row["public_username"] if "public_username" in row.keys() else "",
         "avatar_url": row["avatar_url"] if "avatar_url" in row.keys() else "",
         "comment": row["comment"],
@@ -849,15 +598,9 @@ def get_post_info(post_id: str) -> dict | None:
         "SELECT post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at FROM posts WHERE post_id = ?",
         (post_id,),
     ).fetchone()
-    if not row:
-        row = conn.execute(
-            "SELECT post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at FROM posts WHERE source_post_id = ?",
-            (post_id,),
-        ).fetchone()
     conn.close()
     if not row:
         return None
-    channel = get_channel_info(row["source_chat_id"]) if row["source_chat_id"] else None
     return {
         "post_id": row["post_id"],
         "source_post_id": row["source_post_id"],
@@ -868,497 +611,7 @@ def get_post_info(post_id: str) -> dict | None:
         "message_text": row["message_text"],
         "attachments_json": row["attachments_json"],
         "created_at": row["created_at"],
-        "channel_title": (channel or {}).get("title", ""),
-        "channel_avatar_url": (channel or {}).get("avatar_url", ""),
-        "channel_is_blocked": bool((channel or {}).get("is_blocked", False)),
     }
-
-
-def build_placeholder_post_info(post_id: str, source_post_id: str | None = None) -> dict:
-    normalized_post_id = normalize_post_id(post_id)
-    normalized_source_post_id = normalize_post_id(source_post_id)
-    if not normalized_source_post_id:
-        decoded = decode_post_payload(normalized_post_id)
-        normalized_source_post_id = decoded if decoded.startswith("mid.") else ""
-    return {
-        "post_id": normalized_post_id,
-        "source_post_id": normalized_source_post_id,
-        "source_chat_id": "",
-        "button_message_id": "",
-        "counter_enabled": 0,
-        "post_text": "",
-        "message_text": "",
-        "attachments_json": "[]",
-        "created_at": "",
-        "channel_title": "",
-        "channel_avatar_url": "",
-        "channel_is_blocked": False,
-    }
-
-
-def resolve_post_id(post_id: str) -> str:
-    candidates = get_post_id_candidates(post_id)
-    if not candidates:
-        return ""
-    for candidate in candidates:
-        post = get_post_info(candidate)
-        if post and post.get("post_id"):
-            return str(post["post_id"])
-
-    preferred = get_preferred_post_storage_id(post_id)
-    conn = get_db_connection()
-    for candidate in [preferred] + [item for item in candidates if item != preferred]:
-        row = conn.execute("SELECT COUNT(*) AS count FROM comments WHERE post_id = ?", (candidate,)).fetchone()
-        if row and int(row["count"] or 0) > 0:
-            conn.close()
-            return candidate
-    conn.close()
-    return preferred
-
-
-def ensure_post_record(post_id: str, source_post_id: str | None = None) -> dict | None:
-    normalized_post_id = resolve_post_id(post_id)
-    if not normalized_post_id:
-        return None
-    post = get_post_info(normalized_post_id)
-    if post:
-        return post
-
-    placeholder = build_placeholder_post_info(normalized_post_id, source_post_id=source_post_id or post_id)
-    conn = get_db_connection()
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            placeholder["post_id"],
-            placeholder["source_post_id"],
-            placeholder["source_chat_id"],
-            placeholder["button_message_id"],
-            placeholder["counter_enabled"],
-            placeholder["post_text"],
-            placeholder["message_text"],
-            placeholder["attachments_json"],
-            datetime.now(timezone.utc).isoformat(),
-        ),
-    )
-    conn.commit()
-    conn.close()
-    return get_post_info(normalized_post_id) or placeholder
-
-
-def get_channel_info(chat_id: str) -> dict | None:
-    normalized_chat_id = str(chat_id or "").strip()
-    if not normalized_chat_id:
-        return None
-
-    conn = get_db_connection()
-    row = conn.execute(
-        "SELECT chat_id, title, avatar_url, owner_user_id, owner_username, is_blocked, is_deleted, created_at, updated_at FROM channels WHERE chat_id = ?",
-        (normalized_chat_id,),
-    ).fetchone()
-    conn.close()
-    if not row:
-        return None
-    return {
-        "chat_id": row["chat_id"],
-        "title": row["title"] or "",
-        "avatar_url": row["avatar_url"] or "",
-        "owner_user_id": row["owner_user_id"] or "",
-        "owner_username": row["owner_username"] or "",
-        "is_blocked": bool(row["is_blocked"]),
-        "is_deleted": bool(row["is_deleted"]),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
-
-
-def upsert_channel(
-    chat_id: str,
-    title: str = "",
-    avatar_url: str = "",
-    owner_user_id: str = "",
-    owner_username: str = "",
-    is_blocked: int | None = None,
-    is_deleted: int | None = None,
-):
-    normalized_chat_id = str(chat_id or "").strip()[:256]
-    if not normalized_chat_id:
-        return
-    existing = get_channel_info(normalized_chat_id)
-    now = datetime.now(timezone.utc).isoformat()
-    final_blocked = int(existing["is_blocked"]) if existing and is_blocked is None else int(1 if is_blocked else 0)
-    final_deleted = int(existing["is_deleted"]) if existing and is_deleted is None else int(1 if is_deleted else 0)
-    conn = get_db_connection()
-    conn.execute(
-        """
-        INSERT INTO channels (chat_id, title, avatar_url, owner_user_id, owner_username, is_blocked, is_deleted, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id) DO UPDATE SET
-            title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE channels.title END,
-            avatar_url = CASE WHEN excluded.avatar_url <> '' THEN excluded.avatar_url ELSE channels.avatar_url END,
-            owner_user_id = CASE WHEN channels.owner_user_id = '' AND excluded.owner_user_id <> '' THEN excluded.owner_user_id ELSE channels.owner_user_id END,
-            owner_username = CASE
-                WHEN channels.owner_user_id = '' AND excluded.owner_username <> '' THEN excluded.owner_username
-                WHEN channels.owner_user_id = excluded.owner_user_id AND excluded.owner_username <> '' THEN excluded.owner_username
-                ELSE channels.owner_username
-            END,
-            is_blocked = excluded.is_blocked,
-            is_deleted = excluded.is_deleted,
-            updated_at = excluded.updated_at
-        """,
-        (
-            normalized_chat_id,
-            (title or "").strip()[:255],
-            (avatar_url or "").strip()[:1000],
-            str(owner_user_id or "").strip()[:128],
-            (owner_username or "").strip()[:255],
-            final_blocked,
-            final_deleted,
-            existing["created_at"] if existing else now,
-            now,
-        ),
-    )
-    conn.commit()
-    conn.close()
-
-
-def _channel_needs_refresh(title: str, chat_id: str, avatar_url: str = "") -> bool:
-    normalized_title = str(title or "").strip()
-    normalized_chat_id = str(chat_id or "").strip()
-    normalized_avatar = str(avatar_url or "").strip()
-    return not normalized_title or normalized_title == normalized_chat_id or not normalized_avatar
-
-
-def hydrate_channel_info(channel: dict) -> dict:
-    if not channel:
-        return channel
-    chat_id = str(channel.get("chat_id") or "").strip()
-    if not chat_id:
-        return channel
-    title = str(channel.get("title") or "").strip()
-    avatar_url = str(channel.get("avatar_url") or "").strip()
-    if not _channel_needs_refresh(title, chat_id, avatar_url):
-        return channel
-    chat_info = fetch_chat_info(chat_id) or {}
-    refreshed_title = (chat_info.get("title") or title or chat_id).strip()
-    refreshed_avatar_url = (chat_info.get("avatar_url") or avatar_url or "").strip()
-    if refreshed_title != title or refreshed_avatar_url != avatar_url:
-        upsert_channel(chat_id, title=refreshed_title, avatar_url=refreshed_avatar_url, is_blocked=1 if channel.get("is_blocked") else 0)
-    updated_channel = dict(channel)
-    updated_channel["title"] = refreshed_title
-    updated_channel["avatar_url"] = refreshed_avatar_url
-    return updated_channel
-
-
-def list_channels(owner_user_id: str | None = None, include_deleted: bool = False) -> list[dict]:
-    normalized_owner_user_id = str(owner_user_id or "").strip()
-    conn = get_db_connection()
-    where_parts = []
-    params: list[str] = []
-    if normalized_owner_user_id:
-        where_parts.append("channels.owner_user_id = ?")
-        params.append(normalized_owner_user_id)
-    if not include_deleted:
-        where_parts.append("COALESCE(channels.is_deleted, 0) = 0")
-    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
-    rows = conn.execute(
-        f"""
-        SELECT channels.chat_id, channels.title, channels.avatar_url, channels.owner_user_id, channels.owner_username, channels.is_blocked, channels.is_deleted, channels.created_at, channels.updated_at,
-               COUNT(posts.post_id) AS posts_count
-        FROM channels
-        LEFT JOIN posts ON posts.source_chat_id = channels.chat_id
-        {where_sql}
-        GROUP BY channels.chat_id, channels.title, channels.avatar_url, channels.owner_user_id, channels.owner_username, channels.is_blocked, channels.is_deleted, channels.created_at, channels.updated_at
-        ORDER BY channels.updated_at DESC, channels.chat_id DESC
-        """,
-        params,
-    ).fetchall()
-    conn.close()
-    channels = [
-        {
-            "chat_id": row["chat_id"],
-            "title": row["title"] or row["chat_id"],
-            "avatar_url": row["avatar_url"] or "",
-            "owner_user_id": row["owner_user_id"] or "",
-            "owner_username": row["owner_username"] or "",
-            "is_blocked": bool(row["is_blocked"]),
-            "is_deleted": bool(row["is_deleted"]),
-            "posts_count": int(row["posts_count"] or 0),
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
-        for row in rows
-    ]
-    return [hydrate_channel_info(channel) for channel in channels]
-
-
-def normalize_stats_period(raw_period: str | None) -> str:
-    value = str(raw_period or "").strip().lower()
-    if value in {"month", "месяц", "monthly", "30d", "30"}:
-        return "month"
-    return "week"
-
-
-def _safe_post_label(post_row: sqlite3.Row | dict) -> str:
-    post_text = str((post_row.get("post_text") if isinstance(post_row, dict) else post_row["post_text"]) or "").strip()
-    message_text = str((post_row.get("message_text") if isinstance(post_row, dict) else post_row["message_text"]) or "").strip()
-    source_post_id = str((post_row.get("source_post_id") if isinstance(post_row, dict) else post_row["source_post_id"]) or "").strip()
-    label = post_text or message_text or source_post_id or "Пост без текста"
-    return " ".join(label.split())[:80]
-
-
-def get_channel_stats(chat_id: str | None = None, period: str = "week", owner_user_id: str | None = None) -> dict:
-    normalized_chat_id = str(chat_id or "").strip()
-    normalized_owner_user_id = str(owner_user_id or "").strip()
-    normalized_period = normalize_stats_period(period)
-    days = 30 if normalized_period == "month" else 7
-    now = datetime.now(timezone.utc)
-    since_dt = now - timedelta(days=days)
-    since_iso = since_dt.isoformat()
-    conn = get_db_connection()
-
-    channel_join = "JOIN channels ON channels.chat_id = posts.source_chat_id"
-    owner_filter = " AND channels.owner_user_id = ?" if normalized_owner_user_id else ""
-    deleted_filter = " AND COALESCE(channels.is_deleted, 0) = 0"
-
-    if normalized_chat_id:
-        channel_filter = " AND posts.source_chat_id = ?"
-        channel_params = [normalized_chat_id]
-        channel = hydrate_channel_info(get_channel_info(normalized_chat_id) or {
-            "chat_id": normalized_chat_id,
-            "title": normalized_chat_id,
-            "avatar_url": "",
-            "owner_user_id": "",
-            "owner_username": "",
-            "is_blocked": False,
-            "is_deleted": False,
-        })
-        if normalized_owner_user_id and str(channel.get("owner_user_id") or "").strip() not in {"", normalized_owner_user_id}:
-            channel = {
-                "chat_id": normalized_chat_id,
-                "title": normalized_chat_id,
-                "avatar_url": "",
-                "owner_user_id": normalized_owner_user_id,
-                "owner_username": "",
-                "is_blocked": False,
-                "is_deleted": False,
-            }
-            channel_filter = " AND 1 = 0"
-            channel_params = []
-    else:
-        channel_filter = ""
-        channel_params = []
-        channel = None
-
-    posts_row = conn.execute(
-        f"""
-        SELECT
-            COUNT(*) AS posts_count,
-            SUM(CASE WHEN counter_enabled = 1 THEN 1 ELSE 0 END) AS counter_enabled_posts_count
-        FROM posts
-        {channel_join}
-        WHERE posts.created_at >= ? {channel_filter}{owner_filter}{deleted_filter}
-        """,
-        [since_iso, *channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
-    ).fetchone()
-
-    comments_row = conn.execute(
-        f"""
-        SELECT
-            COUNT(*) AS comments_count,
-            COUNT(DISTINCT comments.user_id) AS unique_commenters,
-            SUM(CASE WHEN comments.parent_id IS NOT NULL THEN 1 ELSE 0 END) AS replies_count,
-            SUM(CASE WHEN TRIM(COALESCE(comments.media_path, '')) <> '' THEN 1 ELSE 0 END) AS media_comments_count,
-            SUM(CASE WHEN comments.author_type = 'channel' THEN 1 ELSE 0 END) AS channel_comments_count
-        FROM comments
-        JOIN posts ON posts.post_id = comments.post_id
-        {channel_join}
-        WHERE comments.created_at >= ? {channel_filter}{owner_filter}{deleted_filter}
-        """,
-        [since_iso, *channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
-    ).fetchone()
-
-    lifetime_row = conn.execute(
-        f"""
-        SELECT
-            COUNT(*) AS comments_total,
-            COUNT(DISTINCT comments.user_id) AS commenters_total
-        FROM comments
-        JOIN posts ON posts.post_id = comments.post_id
-        {channel_join}
-        WHERE 1 = 1 {channel_filter}{owner_filter}{deleted_filter}
-        """,
-        [*channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
-    ).fetchone()
-
-    active_channels_row = conn.execute(
-        f"""
-        SELECT COUNT(DISTINCT source_chat_id) AS active_channels
-        FROM posts
-        {channel_join}
-        WHERE posts.created_at >= ? AND TRIM(COALESCE(source_chat_id, '')) <> ''{owner_filter}{deleted_filter}
-        """,
-        [since_iso, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
-    ).fetchone()
-
-    top_posts_rows = conn.execute(
-        f"""
-        SELECT
-            posts.post_id,
-            posts.source_post_id,
-            posts.post_text,
-            posts.message_text,
-            COUNT(comments.id) AS comments_count,
-            MAX(comments.created_at) AS last_comment_at
-        FROM posts
-        {channel_join}
-        LEFT JOIN comments
-            ON comments.post_id = posts.post_id
-           AND comments.created_at >= ?
-        WHERE 1 = 1 {channel_filter}{owner_filter}{deleted_filter}
-        GROUP BY posts.post_id, posts.source_post_id, posts.post_text, posts.message_text
-        HAVING comments_count > 0
-        ORDER BY comments_count DESC, last_comment_at DESC
-        LIMIT 5
-        """,
-        [since_iso, *channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
-    ).fetchall()
-
-    top_commenters_rows = conn.execute(
-        f"""
-        SELECT
-            comments.user_id,
-            comments.username,
-            comments.author_type,
-            COUNT(*) AS comments_count,
-            MAX(comments.created_at) AS last_comment_at
-        FROM comments
-        JOIN posts ON posts.post_id = comments.post_id
-        {channel_join}
-        WHERE comments.created_at >= ? {channel_filter}{owner_filter}{deleted_filter}
-        GROUP BY comments.user_id, comments.username, comments.author_type
-        ORDER BY comments_count DESC, last_comment_at DESC
-        LIMIT 5
-        """,
-        [since_iso, *channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
-    ).fetchall()
-
-    activity_rows = conn.execute(
-        f"""
-        SELECT
-            SUBSTR(comments.created_at, 1, 10) AS day,
-            COUNT(*) AS comments_count
-        FROM comments
-        JOIN posts ON posts.post_id = comments.post_id
-        {channel_join}
-        WHERE comments.created_at >= ? {channel_filter}{owner_filter}{deleted_filter}
-        GROUP BY SUBSTR(comments.created_at, 1, 10)
-        ORDER BY day ASC
-        """,
-        [since_iso, *channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
-    ).fetchall()
-    conn.close()
-
-    posts_count = int((posts_row["posts_count"] or 0) if posts_row else 0)
-    comments_count = int((comments_row["comments_count"] or 0) if comments_row else 0)
-    unique_commenters = int((comments_row["unique_commenters"] or 0) if comments_row else 0)
-    replies_count = int((comments_row["replies_count"] or 0) if comments_row else 0)
-    media_comments_count = int((comments_row["media_comments_count"] or 0) if comments_row else 0)
-    channel_comments_count = int((comments_row["channel_comments_count"] or 0) if comments_row else 0)
-    counter_enabled_posts_count = int((posts_row["counter_enabled_posts_count"] or 0) if posts_row else 0)
-    comments_total = int((lifetime_row["comments_total"] or 0) if lifetime_row else 0)
-    commenters_total = int((lifetime_row["commenters_total"] or 0) if lifetime_row else 0)
-    active_channels = int((active_channels_row["active_channels"] or 0) if active_channels_row else 0)
-
-    activity_map = {str(row["day"]): int(row["comments_count"] or 0) for row in activity_rows}
-    activity_by_day = []
-    for offset in range(days):
-        day = (since_dt + timedelta(days=offset)).date().isoformat()
-        activity_by_day.append({"day": day, "comments_count": activity_map.get(day, 0)})
-
-    top_posts = [
-        {
-            "post_id": row["post_id"],
-            "source_post_id": row["source_post_id"],
-            "label": _safe_post_label(row),
-            "comments_count": int(row["comments_count"] or 0),
-            "last_comment_at": row["last_comment_at"] or "",
-        }
-        for row in top_posts_rows
-    ]
-    top_commenters = [
-        {
-            "user_id": row["user_id"],
-            "username": row["username"] or "Пользователь",
-            "author_type": row["author_type"] or "user",
-            "comments_count": int(row["comments_count"] or 0),
-            "last_comment_at": row["last_comment_at"] or "",
-        }
-        for row in top_commenters_rows
-    ]
-
-    avg_comments_per_post = round(comments_count / posts_count, 2) if posts_count else 0.0
-    active_days = sum(1 for item in activity_by_day if item["comments_count"] > 0)
-
-    return {
-        "period": normalized_period,
-        "days": days,
-        "scope": "channel" if normalized_chat_id else "all",
-        "generated_at": now.isoformat(),
-        "since": since_dt.isoformat(),
-        "channel": channel,
-        "summary": {
-            "posts_count": posts_count,
-            "counter_enabled_posts_count": counter_enabled_posts_count,
-            "comments_count": comments_count,
-            "comments_total": comments_total,
-            "unique_commenters": unique_commenters,
-            "commenters_total": commenters_total,
-            "replies_count": replies_count,
-            "media_comments_count": media_comments_count,
-            "channel_comments_count": channel_comments_count,
-            "avg_comments_per_post": avg_comments_per_post,
-            "active_days": active_days,
-            "active_channels": active_channels,
-        },
-        "top_posts": top_posts,
-        "top_commenters": top_commenters,
-        "activity_by_day": activity_by_day,
-    }
-
-
-def set_channel_block(chat_id: str, is_blocked: bool):
-    channel = get_channel_info(chat_id)
-    if not channel:
-        upsert_channel(chat_id, title="", avatar_url="", is_blocked=1 if is_blocked else 0)
-    else:
-        upsert_channel(
-            chat_id,
-            title=channel["title"],
-            avatar_url=channel["avatar_url"],
-            owner_user_id=channel.get("owner_user_id", ""),
-            owner_username=channel.get("owner_username", ""),
-            is_blocked=1 if is_blocked else 0,
-            is_deleted=1 if channel.get("is_deleted") else 0,
-        )
-
-
-def set_channel_deleted(chat_id: str, is_deleted: bool):
-    channel = get_channel_info(chat_id)
-    if not channel:
-        upsert_channel(chat_id, title="", avatar_url="", is_blocked=1 if is_deleted else 0, is_deleted=1 if is_deleted else 0)
-    else:
-        upsert_channel(
-            chat_id,
-            title=channel["title"],
-            avatar_url=channel["avatar_url"],
-            owner_user_id=channel.get("owner_user_id", ""),
-            owner_username=channel.get("owner_username", ""),
-            is_blocked=1 if is_deleted else int(1 if channel.get("is_blocked") else 0),
-            is_deleted=1 if is_deleted else 0,
-        )
 
 
 def upsert_user_settings(user: dict, notifications_enabled: int | None = None, consent_accepted: int | None = None):
@@ -1559,29 +812,6 @@ def is_chat_admin(chat_id: str, user_id: str) -> bool:
     return str(user_id) in get_chat_admin_ids(chat_id)
 
 
-def fetch_chat_info(chat_id: str) -> dict | None:
-    normalized_chat_id = str(chat_id or "").strip()
-    if not BOT_TOKEN or not normalized_chat_id:
-        return None
-    try:
-        req = Request(
-            url=f"https://platform-api.max.ru/chats/{quote(normalized_chat_id, safe='')}",
-            headers={"Authorization": BOT_TOKEN},
-            method="GET",
-        )
-        with urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        if not isinstance(data, dict):
-            return None
-        return {
-            "chat_id": normalized_chat_id,
-            "title": (data.get("title") or data.get("name") or data.get("display_name") or "").strip()[:255],
-            "avatar_url": (data.get("avatar_url") or data.get("full_avatar_url") or "").strip()[:1000],
-        }
-    except Exception:
-        return None
-
-
 def user_can_moderate_comment(user_id: str, post_id: str) -> bool:
     post = get_post_info(post_id)
     if not post:
@@ -1592,33 +822,10 @@ def user_can_moderate_comment(user_id: str, post_id: str) -> bool:
     return is_chat_admin(source_chat_id, str(user_id))
 
 
-def _build_comment_preview(actor_comment: str) -> str:
-    return (actor_comment or "").strip() or "Фото/видео"
-
-
-def send_bot_private_message(target_user_id: str, payload: dict):
-    if not BOT_TOKEN or not target_user_id:
-        return
-    try:
-        req = Request(
-            url=f"https://botapi.max.ru/messages?user_id={quote(str(target_user_id), safe='')}",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": BOT_TOKEN,
-            },
-            method="POST",
-        )
-        with urlopen(req, timeout=10) as response:
-            response.read()
-    except Exception as error:
-        print(f"Не удалось отправить личное сообщение пользователю {str(target_user_id)[:32]}: {error}")
-
-
 def send_reply_notification(target_user_id: str, actor_name: str, actor_comment: str, post_id: str):
     if not BOT_TOKEN or not target_user_id:
         return
-    preview = _build_comment_preview(actor_comment)
+    preview = (actor_comment or "").strip() or "Фото/видео"
     text = f"Вам ответили в комментариях.\n\n{actor_name}: {preview[:300]}"
     payload = {
         "text": text,
@@ -1639,48 +846,21 @@ def send_reply_notification(target_user_id: str, actor_name: str, actor_comment:
         ],
     }
 
-    send_bot_private_message(target_user_id, payload)
-
-
-def send_channel_admin_notifications(post_id: str, actor_user_id: str, actor_name: str, actor_comment: str):
-    post = get_post_info(post_id)
-    source_chat_id = str((post or {}).get("source_chat_id") or "").strip()
-    if not source_chat_id or not BOT_TOKEN:
-        return
-
-    channel = get_channel_info(source_chat_id) or {}
-    channel_title = channel.get("title") or source_chat_id
-    preview = _build_comment_preview(actor_comment)
-    post_preview = ((post or {}).get("post_text") or (post or {}).get("message_text") or "").strip()
-    text = f"Новый комментарий в канале «{channel_title}».\n\n{actor_name}: {preview[:300]}"
-    if post_preview:
-        text = f"{text}\n\nПост: {post_preview[:200]}"
-    payload = {
-        "text": text,
-        "notify": True,
-        "attachments": [
-            {
-                "type": "inline_keyboard",
-                "payload": {
-                    "buttons": [[
-                        {
-                            "type": "link",
-                            "text": "Открыть комментарии",
-                            "url": f"https://max.ru/{BOT_USERNAME}?startapp={post_id}",
-                        }
-                    ]]
-                }
-            }
-        ],
-    }
-
-    for admin_id in get_chat_admin_ids(source_chat_id):
-        if str(admin_id) == str(actor_user_id):
-            continue
-        target_settings = get_user_settings(admin_id)
-        if not target_settings.get("notifications_enabled", True):
-            continue
-        send_bot_private_message(admin_id, payload)
+    # ИСПРАВЛЕНО: убран access_token из URL, добавлен заголовок Authorization
+    try:
+        req = Request(
+            url=f"https://botapi.max.ru/messages?user_id={target_user_id}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": BOT_TOKEN
+            },
+            method="POST",
+        )
+        with urlopen(req, timeout=10) as response:
+            response.read()
+    except Exception as error:
+        print(f"Не удалось отправить уведомление пользователю {target_user_id[:32]}: {error}")
 
 
 def refresh_post_button(post_id: str):
@@ -1701,7 +881,6 @@ def refresh_post_button(post_id: str):
             attachments = []
     except json.JSONDecodeError:
         attachments = []
-    attachments = [attachment for attachment in attachments if isinstance(attachment, dict) and attachment.get("type") != "inline_keyboard"]
 
     attachments.append(
         {
@@ -1727,7 +906,7 @@ def refresh_post_button(post_id: str):
     # ИСПРАВЛЕНО: убран access_token из URL, message_id перенесён в путь, добавлен заголовок Authorization
     try:
         req = Request(
-            url=f"https://platform-api.max.ru/messages?message_id={quote(str(target_message_id), safe='')}",
+            url=f"https://botapi.max.ru/messages/{target_message_id}",
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
@@ -1738,14 +917,7 @@ def refresh_post_button(post_id: str):
         with urlopen(req, timeout=10) as response:
             response.read()
     except Exception as error:
-        if isinstance(error, HTTPError):
-            try:
-                details = error.read().decode("utf-8", errors="replace")[:400]
-            except Exception:
-                details = str(error)
-            print(f"Не удалось обновить кнопку комментариев для {post_id[:32]}: HTTP {error.code} {details}")
-        else:
-            print(f"Не удалось обновить кнопку комментариев для {post_id[:32]}: {error}")
+        print(f"Не удалось обновить кнопку комментариев для {post_id[:32]}: {error}")
 
 
 HTML_TEMPLATE = """
@@ -2230,20 +1402,6 @@ HTML_TEMPLATE = """
             font-size: 11px;
         }
 
-        .author-badge {
-            display: inline-flex;
-            align-items: center;
-            margin-left: 6px;
-            padding: 2px 6px;
-            border-radius: 999px;
-            background: rgba(46, 166, 255, 0.14);
-            color: #8fd1ff;
-            font-size: 10px;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-            vertical-align: middle;
-        }
-
         .empty {
             align-self: center;
             margin-top: 28px;
@@ -2406,28 +1564,8 @@ HTML_TEMPLATE = """
             margin-top: 4px;
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-end;
             gap: 10px;
-        }
-
-        .channel-toggle {
-            display: none;
-            align-items: center;
-            gap: 8px;
-            font-size: 12px;
-            color: #cfe5fb;
-            background: rgba(34, 49, 64, 0.82);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 999px;
-            padding: 6px 10px;
-        }
-
-        .channel-toggle.show {
-            display: inline-flex;
-        }
-
-        .channel-toggle input {
-            accent-color: #2ea6ff;
         }
 
         .status {
@@ -2631,10 +1769,6 @@ HTML_TEMPLATE = """
                 </button>
             </div>
             <div class="composer-actions">
-                <label class="channel-toggle" id="channelToggleWrap">
-                    <input id="postAsChannel" type="checkbox">
-                    <span id="channelToggleText">От имени канала</span>
-                </label>
                 <div class="status" id="status"></div>
             </div>
         </div>
@@ -2695,9 +1829,6 @@ HTML_TEMPLATE = """
         const previewVideoShell = document.getElementById("previewVideoShell");
         const removeImageBtn = document.getElementById("removeImageBtn");
         const editImageBtn = document.getElementById("editImageBtn");
-        const channelToggleWrap = document.getElementById("channelToggleWrap");
-        const channelToggleText = document.getElementById("channelToggleText");
-        const postAsChannel = document.getElementById("postAsChannel");
         const postCard = document.getElementById("postCard");
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
@@ -2763,29 +1894,6 @@ HTML_TEMPLATE = """
             status.className = "status " + type;
         }
 
-        function getConsentStorageKey() {
-            const userId = currentUser && currentUser.user_id ? String(currentUser.user_id) : "anonymous";
-            return `max-comments-consent:${userId}`;
-        }
-
-        function syncConsentCache(value) {
-            try {
-                if (value) {
-                    window.localStorage.setItem(getConsentStorageKey(), "1");
-                } else {
-                    window.localStorage.removeItem(getConsentStorageKey());
-                }
-            } catch (error) {}
-        }
-
-        function hasCachedConsent() {
-            try {
-                return window.localStorage.getItem(getConsentStorageKey()) === "1";
-            } catch (error) {
-                return false;
-            }
-        }
-
         function buildMenuButton(label, iconPath, action, extraClass = "") {
             return `<button type="button" class="${extraClass}" onclick="${action}"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true">${iconPath}</svg><span>${label}</span></button>`;
         }
@@ -2795,19 +1903,6 @@ HTML_TEMPLATE = """
             const enabled = Boolean(notificationSettings && notificationSettings.notifications_enabled);
             notifyToggle.classList.toggle("active", enabled);
             notifyToggle.title = enabled ? "Уведомления включены" : "Уведомления выключены";
-        }
-
-        function updateChannelToggle(postInfo) {
-            const canPostAsChannel = Boolean(postInfo && postInfo.viewer_can_post_as_channel);
-            if (!channelToggleWrap || !postAsChannel) return;
-            channelToggleWrap.classList.toggle("show", canPostAsChannel);
-            if (!canPostAsChannel) {
-                postAsChannel.checked = false;
-                channelToggleText.textContent = "От имени канала";
-                return;
-            }
-            const channelTitle = String(postInfo && postInfo.channel_title ? postInfo.channel_title : "канала");
-            channelToggleText.textContent = `От имени: ${channelTitle}`;
         }
 
         function buildCommentsSignature(comments) {
@@ -2837,7 +1932,6 @@ HTML_TEMPLATE = """
                         notifications_enabled: Boolean(data.settings.notifications_enabled),
                         consent_accepted: Boolean(data.settings.consent_accepted),
                     };
-                    syncConsentCache(notificationSettings.consent_accepted);
                     updateNotifyToggle();
                 }
             } catch (error) {
@@ -2870,7 +1964,7 @@ HTML_TEMPLATE = """
         }
 
         function hasConsent() {
-            return Boolean((notificationSettings && notificationSettings.consent_accepted) || hasCachedConsent());
+            return Boolean(notificationSettings && notificationSettings.consent_accepted);
         }
 
         function openConsentModal() {
@@ -2896,7 +1990,6 @@ HTML_TEMPLATE = """
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Не удалось сохранить согласие");
                 notificationSettings.consent_accepted = Boolean(data.consent_accepted);
-                syncConsentCache(notificationSettings.consent_accepted);
             } catch (error) {
                 showStatus(error.message || "Ошибка согласия", "error");
                 return;
@@ -3261,7 +2354,6 @@ function setPreviewFromFile(file) {
             const normalizedMediaType = normalizeMediaType(comment.media_type, mediaUrl);
             const profileAction = comment.public_username ? `onclick="openProfileLink('${escapeHtml(comment.public_username)}')"` : "";
             const avatarUrl = comment.avatar_url ? encodeURI(comment.avatar_url) : "";
-            const authorBadge = comment.author_type === "channel" ? '<span class="author-badge">канал</span>' : "";
             const avatarHtml = avatarUrl
                 ? `<div class="avatar" ${profileAction}><img src="${avatarUrl}" alt="${escapeHtml(comment.username)}" loading="lazy" onerror="this.style.display='none'; this.parentElement.textContent='${initial}'"></div>`
                 : `<div class="avatar" ${profileAction}>${initial}</div>`;
@@ -3277,7 +2369,7 @@ function setPreviewFromFile(file) {
                     <div class="message-row ${mine ? "mine" : ""}">
                         ${mine ? "" : avatarHtml}
                         <div class="bubble" data-comment-id="${comment.id}">
-                            <div class="message-name" ${profileAction}>${escapeHtml(comment.username)} ${authorBadge}</div>
+                            <div class="message-name" ${profileAction}>${escapeHtml(comment.username)}</div>
                             ${parentPreview}
                             <div class="message-text">${escapeHtml(comment.comment)}</div>
                             ${mediaHtml}
@@ -3330,7 +2422,6 @@ function setPreviewFromFile(file) {
                     postCard.hidden = true;
                     lastRenderedPostText = "";
                 }
-                updateChannelToggle(data.post || {});
                 renderComments(data.comments || []);
                 bindContextHandlers();
             } catch (error) {
@@ -3372,7 +2463,6 @@ function setPreviewFromFile(file) {
                     formData.append("post_id", postId);
                     formData.append("comment", comment);
                     formData.append("init_data", initData);
-                    if (postAsChannel && postAsChannel.checked) formData.append("post_as_channel", "1");
                     if (replyToCommentId) formData.append("parent_id", String(replyToCommentId));
                     if (selectedImage) formData.append("image", selectedImage);
                     response = await fetch("/api/comment", { method: "POST", body: formData });
@@ -3719,227 +2809,6 @@ def get_settings():
     return jsonify({"settings": get_user_settings(verified_user["user_id"])})
 
 
-def list_channels(owner_user_id: str | None = None, include_deleted: bool = False) -> list[dict]:
-    conn = get_db_connection()
-    rows = conn.execute(
-        """
-        SELECT channels.chat_id, channels.title, channels.avatar_url, channels.is_blocked, channels.created_at, channels.updated_at,
-               COUNT(posts.post_id) AS posts_count
-        FROM channels
-        LEFT JOIN posts ON posts.source_chat_id = channels.chat_id
-        GROUP BY channels.chat_id, channels.title, channels.avatar_url, channels.is_blocked, channels.created_at, channels.updated_at
-        ORDER BY channels.updated_at DESC, channels.chat_id DESC
-        """
-    ).fetchall()
-    conn.close()
-    channels = [
-        {
-            "chat_id": row["chat_id"],
-            "title": row["title"] or row["chat_id"],
-            "avatar_url": row["avatar_url"] or "",
-            "is_blocked": bool(row["is_blocked"]),
-            "posts_count": int(row["posts_count"] or 0),
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
-        for row in rows
-    ]
-    return [hydrate_channel_info(channel) for channel in channels]
-
-
-def get_channel_stats(chat_id: str | None = None, period: str = "week", owner_user_id: str | None = None) -> dict:
-    normalized_chat_id = str(chat_id or "").strip()
-    normalized_period = normalize_stats_period(period)
-    days = 30 if normalized_period == "month" else 7
-    now = datetime.now(timezone.utc)
-    since_dt = now - timedelta(days=days)
-    since_iso = since_dt.isoformat()
-    conn = get_db_connection()
-
-    if normalized_chat_id:
-        channel_filter = " AND posts.source_chat_id = ?"
-        channel_params = [normalized_chat_id]
-        channel = hydrate_channel_info(get_channel_info(normalized_chat_id) or {
-            "chat_id": normalized_chat_id,
-            "title": normalized_chat_id,
-            "avatar_url": "",
-            "is_blocked": False,
-        })
-    else:
-        channel_filter = ""
-        channel_params = []
-        channel = None
-
-    posts_row = conn.execute(
-        f"""
-        SELECT
-            COUNT(*) AS posts_count,
-            SUM(CASE WHEN counter_enabled = 1 THEN 1 ELSE 0 END) AS counter_enabled_posts_count
-        FROM posts
-        WHERE created_at >= ? {channel_filter}
-        """,
-        [since_iso, *channel_params],
-    ).fetchone()
-
-    comments_row = conn.execute(
-        f"""
-        SELECT
-            COUNT(*) AS comments_count,
-            COUNT(DISTINCT comments.user_id) AS unique_commenters,
-            SUM(CASE WHEN comments.parent_id IS NOT NULL THEN 1 ELSE 0 END) AS replies_count,
-            SUM(CASE WHEN TRIM(COALESCE(comments.media_path, '')) <> '' THEN 1 ELSE 0 END) AS media_comments_count,
-            SUM(CASE WHEN comments.author_type = 'channel' THEN 1 ELSE 0 END) AS channel_comments_count
-        FROM comments
-        JOIN posts ON posts.post_id = comments.post_id
-        WHERE comments.created_at >= ? {channel_filter}
-        """,
-        [since_iso, *channel_params],
-    ).fetchone()
-
-    lifetime_row = conn.execute(
-        f"""
-        SELECT
-            COUNT(*) AS comments_total,
-            COUNT(DISTINCT comments.user_id) AS commenters_total
-        FROM comments
-        JOIN posts ON posts.post_id = comments.post_id
-        WHERE 1 = 1 {channel_filter}
-        """,
-        channel_params,
-    ).fetchone()
-
-    active_channels_row = conn.execute(
-        """
-        SELECT COUNT(DISTINCT source_chat_id) AS active_channels
-        FROM posts
-        WHERE created_at >= ? AND TRIM(COALESCE(source_chat_id, '')) <> ''
-        """,
-        [since_iso],
-    ).fetchone()
-
-    top_posts_rows = conn.execute(
-        f"""
-        SELECT
-            posts.post_id,
-            posts.source_post_id,
-            posts.post_text,
-            posts.message_text,
-            COUNT(comments.id) AS comments_count,
-            MAX(comments.created_at) AS last_comment_at
-        FROM posts
-        LEFT JOIN comments
-            ON comments.post_id = posts.post_id
-           AND comments.created_at >= ?
-        WHERE 1 = 1 {channel_filter}
-        GROUP BY posts.post_id, posts.source_post_id, posts.post_text, posts.message_text
-        HAVING comments_count > 0
-        ORDER BY comments_count DESC, last_comment_at DESC
-        LIMIT 5
-        """,
-        [since_iso, *channel_params],
-    ).fetchall()
-
-    top_commenters_rows = conn.execute(
-        f"""
-        SELECT
-            comments.user_id,
-            comments.username,
-            comments.author_type,
-            COUNT(*) AS comments_count,
-            MAX(comments.created_at) AS last_comment_at
-        FROM comments
-        JOIN posts ON posts.post_id = comments.post_id
-        WHERE comments.created_at >= ? {channel_filter}
-        GROUP BY comments.user_id, comments.username, comments.author_type
-        ORDER BY comments_count DESC, last_comment_at DESC
-        LIMIT 5
-        """,
-        [since_iso, *channel_params],
-    ).fetchall()
-
-    activity_rows = conn.execute(
-        f"""
-        SELECT
-            SUBSTR(comments.created_at, 1, 10) AS day,
-            COUNT(*) AS comments_count
-        FROM comments
-        JOIN posts ON posts.post_id = comments.post_id
-        WHERE comments.created_at >= ? {channel_filter}
-        GROUP BY SUBSTR(comments.created_at, 1, 10)
-        ORDER BY day ASC
-        """,
-        [since_iso, *channel_params],
-    ).fetchall()
-    conn.close()
-
-    posts_count = int((posts_row["posts_count"] or 0) if posts_row else 0)
-    comments_count = int((comments_row["comments_count"] or 0) if comments_row else 0)
-    unique_commenters = int((comments_row["unique_commenters"] or 0) if comments_row else 0)
-    replies_count = int((comments_row["replies_count"] or 0) if comments_row else 0)
-    media_comments_count = int((comments_row["media_comments_count"] or 0) if comments_row else 0)
-    channel_comments_count = int((comments_row["channel_comments_count"] or 0) if comments_row else 0)
-    counter_enabled_posts_count = int((posts_row["counter_enabled_posts_count"] or 0) if posts_row else 0)
-    comments_total = int((lifetime_row["comments_total"] or 0) if lifetime_row else 0)
-    commenters_total = int((lifetime_row["commenters_total"] or 0) if lifetime_row else 0)
-    active_channels = int((active_channels_row["active_channels"] or 0) if active_channels_row else 0)
-
-    activity_map = {str(row["day"]): int(row["comments_count"] or 0) for row in activity_rows}
-    activity_by_day = []
-    for offset in range(days):
-        day = (since_dt + timedelta(days=offset)).date().isoformat()
-        activity_by_day.append({"day": day, "comments_count": activity_map.get(day, 0)})
-
-    top_posts = [
-        {
-            "post_id": row["post_id"],
-            "source_post_id": row["source_post_id"],
-            "label": _safe_post_label(row),
-            "comments_count": int(row["comments_count"] or 0),
-            "last_comment_at": row["last_comment_at"] or "",
-        }
-        for row in top_posts_rows
-    ]
-    top_commenters = [
-        {
-            "user_id": row["user_id"],
-            "username": row["username"] or "Пользователь",
-            "author_type": row["author_type"] or "user",
-            "comments_count": int(row["comments_count"] or 0),
-            "last_comment_at": row["last_comment_at"] or "",
-        }
-        for row in top_commenters_rows
-    ]
-
-    avg_comments_per_post = round(comments_count / posts_count, 2) if posts_count else 0.0
-    active_days = sum(1 for item in activity_by_day if item["comments_count"] > 0)
-
-    return {
-        "period": normalized_period,
-        "days": days,
-        "scope": "channel" if normalized_chat_id else "all",
-        "generated_at": now.isoformat(),
-        "since": since_dt.isoformat(),
-        "channel": channel,
-        "summary": {
-            "posts_count": posts_count,
-            "counter_enabled_posts_count": counter_enabled_posts_count,
-            "comments_count": comments_count,
-            "comments_total": comments_total,
-            "unique_commenters": unique_commenters,
-            "commenters_total": commenters_total,
-            "replies_count": replies_count,
-            "media_comments_count": media_comments_count,
-            "channel_comments_count": channel_comments_count,
-            "avg_comments_per_post": avg_comments_per_post,
-            "active_days": active_days,
-            "active_channels": active_channels,
-        },
-        "top_posts": top_posts,
-        "top_commenters": top_commenters,
-        "activity_by_day": activity_by_day,
-    }
-
-
 @app.route("/api/settings/notifications", methods=["POST"])
 def update_notifications():
     payload = request.get_json(silent=True) or {}
@@ -3978,23 +2847,11 @@ def register_post():
     counter_enabled = 1 if payload.get("counter_enabled", True) else 0
     post_text = (payload.get("post_text") or "").strip()[:4000]
     message_text = (payload.get("message_text") or "").strip()[:4000]
-    channel_title = (payload.get("channel_title") or "").strip()[:255]
-    channel_avatar_url = (payload.get("channel_avatar_url") or "").strip()[:1000]
     attachments_json = payload.get("attachments") or []
     if not isinstance(attachments_json, list):
         attachments_json = []
     if not post_id:
         return jsonify({"error": "Не переданы данные поста"}), 400
-    if source_chat_id:
-        chat_info = fetch_chat_info(source_chat_id) if not channel_title else None
-        upsert_channel(
-            source_chat_id,
-            title=channel_title or (chat_info or {}).get("title", ""),
-            avatar_url=channel_avatar_url or (chat_info or {}).get("avatar_url", ""),
-        )
-        channel = get_channel_info(source_chat_id)
-        if channel and channel.get("is_blocked"):
-            return jsonify({"error": "Канал заблокирован"}), 403
 
     conn = get_db_connection()
     conn.execute(
@@ -4020,81 +2877,9 @@ def register_post():
     return jsonify({"status": "success"})
 
 
-def register_post_safe():
-    payload = request.get_json(silent=True) or {}
-    try:
-        post_id = normalize_post_id(payload.get("post_id"))
-        source_post_id = str(payload.get("source_post_id") or "").strip()[:256]
-        source_chat_id = str(payload.get("source_chat_id") or "").strip()[:256]
-        button_message_id = str(payload.get("button_message_id") or "").strip()[:256]
-        counter_enabled = 1 if payload.get("counter_enabled", True) else 0
-        post_text = (payload.get("post_text") or "").strip()[:4000]
-        message_text = (payload.get("message_text") or "").strip()[:4000]
-        channel_title = (payload.get("channel_title") or "").strip()[:255]
-        channel_avatar_url = (payload.get("channel_avatar_url") or "").strip()[:1000]
-        attachments_json = payload.get("attachments") or []
-        if not isinstance(attachments_json, list):
-            attachments_json = []
-        if not post_id:
-            return jsonify({"error": "Не переданы данные поста"}), 400
-
-        if source_chat_id:
-            try:
-                chat_info = fetch_chat_info(source_chat_id) if not channel_title else None
-                upsert_channel(
-                    source_chat_id,
-                    title=channel_title or (chat_info or {}).get("title", ""),
-                    avatar_url=channel_avatar_url or (chat_info or {}).get("avatar_url", ""),
-                )
-                channel = get_channel_info(source_chat_id)
-                if channel and channel.get("is_blocked"):
-                    return jsonify({"error": "Канал заблокирован"}), 403
-            except Exception as channel_error:
-                print(f"Ошибка подготовки канала {source_chat_id[:64]} при регистрации поста {post_id[:64]}: {channel_error}")
-
-        conn = get_db_connection()
-        conn.execute(
-            """
-            INSERT INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(post_id) DO UPDATE SET
-                source_post_id = excluded.source_post_id,
-                source_chat_id = excluded.source_chat_id,
-                button_message_id = excluded.button_message_id,
-                counter_enabled = excluded.counter_enabled,
-                post_text = excluded.post_text,
-                message_text = excluded.message_text,
-                attachments_json = excluded.attachments_json
-            """,
-            (
-                post_id,
-                source_post_id,
-                source_chat_id,
-                button_message_id,
-                counter_enabled,
-                post_text,
-                message_text,
-                json.dumps(attachments_json, ensure_ascii=False),
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        conn.commit()
-        conn.close()
-        sync_store_db("post-upsert")
-        update_store_archive("post-upsert")
-        create_backup("post-upsert")
-        return jsonify({"status": "success"})
-    except Exception as error:
-        app.logger.exception("register_post failed")
-        return jsonify({"error": "register_post_failed", "details": str(error)[:500]}), 500
-
-
-app.view_functions["register_post"] = register_post_safe
-
-
 @app.route("/api/comments/<path:post_id>")
 def get_comments_by_post(post_id):
-    normalized_post_id = resolve_post_id(post_id)
+    normalized_post_id = normalize_post_id(post_id)
     if not normalized_post_id:
         return jsonify({"error": "?? ??????? post_id"}), 400
 
@@ -4105,7 +2890,7 @@ def get_comments_by_post(post_id):
     conn = get_db_connection()
     rows = conn.execute(
         """
-        SELECT comments.id, comments.post_id, comments.user_id, comments.username, comments.author_type, comments.channel_chat_id, comments.comment, comments.image_path, comments.media_path, comments.media_type, comments.parent_id, comments.edited_at, comments.created_at
+        SELECT comments.id, comments.post_id, comments.user_id, comments.username, comments.comment, comments.image_path, comments.media_path, comments.media_type, comments.parent_id, comments.edited_at, comments.created_at
         , COALESCE(comments.public_username, user_settings.public_username) AS public_username
         , COALESCE(comments.avatar_url, user_settings.avatar_url) AS avatar_url
         FROM comments
@@ -4125,17 +2910,12 @@ def get_comments_by_post(post_id):
         comment["can_edit"] = is_owner
         comment["can_delete"] = is_owner or viewer_is_admin
         comments.append(comment)
-    post_info = get_post_info(normalized_post_id)
-    if not post_info and rows:
-        post_info = build_placeholder_post_info(normalized_post_id, source_post_id=post_id)
-    post_info = post_info or {}
-    post_info["viewer_can_post_as_channel"] = bool(viewer_is_admin and post_info.get("source_chat_id"))
-    return jsonify({"post_id": normalized_post_id, "post": post_info, "comments": comments})
+    return jsonify({"post_id": normalized_post_id, "post": get_post_info(normalized_post_id), "comments": comments})
 
 
 @app.route("/api/post_count/<path:post_id>")
 def get_post_count(post_id):
-    normalized_post_id = resolve_post_id(post_id)
+    normalized_post_id = normalize_post_id(post_id)
     if not normalized_post_id:
         return jsonify({"error": "Не передан post_id"}), 400
     conn = get_db_connection()
@@ -4147,11 +2927,9 @@ def get_post_count(post_id):
 @app.route("/api/comment", methods=["POST"])
 def add_comment():
     payload, files = parse_request_payload()
-    original_post_id = payload.get("post_id")
-    post_id = resolve_post_id(original_post_id)
+    post_id = normalize_post_id(payload.get("post_id"))
     comment = normalize_comment(payload.get("comment"))
     parent_id = payload.get("parent_id")
-    post_as_channel = str(payload.get("post_as_channel") or "").strip().lower() in {"1", "true", "yes", "on"}
     verified_user = validate_max_init_data(payload.get("init_data", ""))
 
     if not post_id:
@@ -4165,28 +2943,6 @@ def add_comment():
     if not comment and not media_path:
         return jsonify({"error": "Комментарий пустой"}), 400
 
-    post = get_post_info(post_id)
-    if not post:
-        post = ensure_post_record(post_id, source_post_id=original_post_id)
-    if not post:
-        return jsonify({"error": "Пост не найден"}), 404
-    source_chat_id = str(post.get("source_chat_id") or "").strip()
-    channel = get_channel_info(source_chat_id) if source_chat_id else None
-    if channel and channel.get("is_blocked"):
-        return jsonify({"error": "Канал заблокирован"}), 403
-    author_type = "channel" if post_as_channel else "user"
-    author_name = verified_user["username"]
-    author_public_username = verified_user.get("public_username", "")
-    author_avatar_url = verified_user.get("avatar_url", "")
-    channel_chat_id = None
-    if post_as_channel:
-        if not source_chat_id or not user_can_moderate_comment(verified_user["user_id"], post_id):
-            return jsonify({"error": "Писать от имени канала может только администратор"}), 403
-        author_name = (channel or {}).get("title") or "Канал"
-        author_public_username = ""
-        author_avatar_url = (channel or {}).get("avatar_url", "")
-        channel_chat_id = source_chat_id
-
     normalized_parent_id = int(parent_id) if str(parent_id or "").isdigit() else None
     created_at = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection()
@@ -4199,17 +2955,15 @@ def add_comment():
         ).fetchone()
     cursor.execute(
         """
-        INSERT INTO comments (post_id, user_id, username, author_type, channel_chat_id, public_username, avatar_url, comment, image_path, media_path, media_type, parent_id, edited_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO comments (post_id, user_id, username, public_username, avatar_url, comment, image_path, media_path, media_type, parent_id, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             post_id,
             verified_user["user_id"],
-            author_name,
-            author_type,
-            channel_chat_id,
-            author_public_username,
-            author_avatar_url,
+            verified_user["username"],
+            verified_user.get("public_username", ""),
+            verified_user.get("avatar_url", ""),
             comment,
             media_path,
             media_path,
@@ -4230,8 +2984,7 @@ def add_comment():
     if parent_comment and parent_comment["user_id"] != verified_user["user_id"]:
         target_settings = get_user_settings(parent_comment["user_id"])
         if target_settings.get("notifications_enabled"):
-            send_reply_notification(parent_comment["user_id"], author_name, comment, post_id)
-    send_channel_admin_notifications(post_id, verified_user["user_id"], author_name, comment)
+            send_reply_notification(parent_comment["user_id"], verified_user["username"], comment, post_id)
 
     return jsonify({"status": "success", "comment": {"id": comment_id}})
 
@@ -4308,151 +3061,6 @@ def uploads(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
-@app.route("/api/admin/export-store")
-def export_store():
-    if not require_sync_secret():
-        return jsonify({"error": "forbidden"}), 403
-    if not os.path.exists(STORE_ARCHIVE_PATH):
-        update_store_archive("sync-export")
-    if not os.path.exists(STORE_ARCHIVE_PATH):
-        return jsonify({"error": "store archive not found"}), 404
-    return send_file(STORE_ARCHIVE_PATH, mimetype="application/zip", as_attachment=True, download_name="comment_store.zip")
-
-
-@app.route("/api/admin/import-store", methods=["POST"])
-def import_store():
-    if not require_sync_secret():
-        return jsonify({"error": "forbidden"}), 403
-    file = request.files.get("archive")
-    if not file or not file.filename:
-        return jsonify({"error": "archive is required"}), 400
-    temp_path = STORE_ARCHIVE_PATH + ".upload"
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        file.save(temp_path)
-        current_count = count_comments_in_db(DB_PATH)
-        incoming_count = count_comments_in_archive(temp_path)
-        if incoming_count == 0 and current_count > 0:
-            return jsonify({"error": "incoming archive is empty", "db_comment_count": current_count}), 409
-        try:
-            with open(temp_path, "rb") as source_file:
-                archive_bytes = source_file.read()
-            with open(STORE_ARCHIVE_PATH, "wb") as target_file:
-                target_file.write(archive_bytes)
-        except OSError:
-            os.replace(temp_path, STORE_ARCHIVE_PATH)
-        if not import_store_archive(STORE_ARCHIVE_PATH):
-            return jsonify({"error": "failed to import archive"}), 500
-        return jsonify({"status": "success", "db_comment_count": count_comments_in_db(DB_PATH)})
-    finally:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-
-
-@app.route("/api/admin/chats")
-def export_known_chats():
-    if not require_sync_secret():
-        return jsonify({"error": "forbidden"}), 403
-    conn = get_db_connection()
-    rows = conn.execute(
-        """
-        SELECT DISTINCT source_chat_id
-        FROM posts
-        WHERE TRIM(COALESCE(source_chat_id, '')) <> ''
-        ORDER BY source_chat_id
-        """
-    ).fetchall()
-    conn.close()
-    return jsonify({"chat_ids": [str(row["source_chat_id"]) for row in rows]})
-
-
-@app.route("/api/admin/channels")
-def admin_channels():
-    if not require_sync_secret():
-        return jsonify({"error": "forbidden"}), 403
-    return jsonify({"channels": list_channels()})
-
-
-@app.route("/api/admin/stats")
-def admin_stats():
-    if not require_sync_secret():
-        return jsonify({"error": "forbidden"}), 403
-    chat_id = str(request.args.get("chat_id") or "").strip()
-    period = normalize_stats_period(request.args.get("period"))
-    return jsonify(get_channel_stats(chat_id=chat_id or None, period=period))
-
-
-@app.route("/api/admin/post/<path:post_id>")
-def admin_post_lookup(post_id):
-    if not require_sync_secret():
-        return jsonify({"error": "forbidden"}), 403
-    resolved_post_id = resolve_post_id(post_id)
-    post = get_post_info(resolved_post_id) if resolved_post_id else None
-    if not post and resolved_post_id:
-        conn = get_db_connection()
-        row = conn.execute("SELECT COUNT(*) AS count FROM comments WHERE post_id = ?", (resolved_post_id,)).fetchone()
-        conn.close()
-        if row and int(row["count"] or 0) > 0:
-            post = build_placeholder_post_info(resolved_post_id, source_post_id=post_id)
-    return jsonify({"post": post})
-
-
-@app.route("/api/admin/channels/<path:chat_id>/block", methods=["POST"])
-def admin_block_channel(chat_id):
-    if not require_sync_secret():
-        return jsonify({"error": "forbidden"}), 403
-    payload = request.get_json(silent=True) or {}
-    is_blocked = bool(payload.get("blocked", True))
-    channel_info = fetch_chat_info(chat_id) or {}
-    upsert_channel(
-        chat_id,
-        title=channel_info.get("title", ""),
-        avatar_url=channel_info.get("avatar_url", ""),
-        is_blocked=1 if is_blocked else 0,
-    )
-    sync_store_db("channel-block")
-    update_store_archive("channel-block")
-    create_backup("channel-block")
-    return jsonify({"status": "success", "channel": get_channel_info(chat_id)})
-
-
-@app.route("/api/admin/channels/<path:chat_id>/delete", methods=["POST"])
-def admin_delete_channel(chat_id):
-    if not require_sync_secret():
-        return jsonify({"error": "forbidden"}), 403
-    set_channel_deleted(chat_id, True)
-    sync_store_db("channel-delete")
-    update_store_archive("channel-delete")
-    create_backup("channel-delete")
-    return jsonify({"status": "success", "channel": get_channel_info(chat_id)})
-
-
-@app.route("/api/admin/channels/<path:chat_id>/restore", methods=["POST"])
-def admin_restore_channel(chat_id):
-    if not require_sync_secret():
-        return jsonify({"error": "forbidden"}), 403
-    payload = request.get_json(silent=True) or {}
-    owner_user_id = str(payload.get("owner_user_id") or "").strip()[:128]
-    owner_username = (payload.get("owner_username") or "").strip()[:255]
-    channel_info = fetch_chat_info(chat_id) or {}
-    upsert_channel(
-        chat_id,
-        title=channel_info.get("title", ""),
-        avatar_url=channel_info.get("avatar_url", ""),
-        owner_user_id=owner_user_id,
-        owner_username=owner_username,
-        is_blocked=0,
-        is_deleted=0,
-    )
-    sync_store_db("channel-restore")
-    update_store_archive("channel-restore")
-    create_backup("channel-restore")
-    return jsonify({"status": "success", "channel": get_channel_info(chat_id)})
-
-
 @app.route("/health")
 def health():
     backups = []
@@ -4465,12 +3073,9 @@ def health():
     return jsonify(
         {
             "status": "ok",
-            "data_dir": DATA_DIR,
             "db_exists": os.path.exists(DB_PATH),
-            "db_comment_count": count_comments_in_db(DB_PATH),
             "store_db_exists": os.path.exists(STORE_DB_PATH),
             "store_db_path": STORE_DB_PATH,
-            "store_db_comment_count": count_comments_in_db(STORE_DB_PATH),
             "store_archive_exists": os.path.exists(STORE_ARCHIVE_PATH),
             "store_archive_path": STORE_ARCHIVE_PATH,
             "backup_dir": BACKUP_DIR,
@@ -4487,12 +3092,10 @@ def request_too_large(_error):
 migrate_legacy_storage()
 restore_store_db_if_needed()
 restore_store_archive_if_needed()
-restore_latest_backup_if_needed()
 init_db()
-if count_comments_in_db(DB_PATH) > 0:
-    sync_store_db("startup")
-    update_store_archive("startup")
-    create_backup("startup")
+sync_store_db("startup")
+update_store_archive("startup")
+create_backup("startup")
 
 
 if __name__ == "__main__":
