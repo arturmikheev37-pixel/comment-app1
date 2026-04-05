@@ -397,6 +397,59 @@ def update_store_archive(reason: str = "sync") -> str | None:
             return None
 
 
+def count_comments_in_archive(archive_path: str) -> int:
+    if not os.path.exists(archive_path):
+        return 0
+    temp_dir = os.path.join(DATA_DIR, f"_archive_check_{uuid.uuid4().hex}")
+    try:
+        os.makedirs(temp_dir, exist_ok=True)
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            members = archive.namelist()
+            if "comments.db" not in members:
+                return 0
+            archive.extract("comments.db", temp_dir)
+            if "comments.db-wal" in members:
+                archive.extract("comments.db-wal", temp_dir)
+            if "comments.db-shm" in members:
+                archive.extract("comments.db-shm", temp_dir)
+        return count_comments_in_db(os.path.join(temp_dir, "comments.db"))
+    except Exception:
+        return 0
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def require_sync_secret() -> bool:
+    if not SYNC_SECRET:
+        return False
+    return request.headers.get("X-Sync-Secret", "").strip() == SYNC_SECRET
+
+
+def import_store_archive(archive_path: str) -> bool:
+    if not os.path.exists(archive_path):
+        return False
+    with BACKUP_LOCK:
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                members = archive.namelist()
+                if "comments.db" in members:
+                    archive.extract("comments.db", DATA_DIR)
+                if "comments.db-wal" in members:
+                    archive.extract("comments.db-wal", DATA_DIR)
+                if "comments.db-shm" in members:
+                    archive.extract("comments.db-shm", DATA_DIR)
+                upload_members = [name for name in members if name.startswith("uploads/")]
+                if upload_members:
+                    os.makedirs(UPLOAD_DIR, exist_ok=True)
+                    for member in upload_members:
+                        archive.extract(member, DATA_DIR)
+            return True
+        except Exception as error:
+            print(f"Не удалось импортировать архив store: {error}")
+            return False
+
+
 def normalize_post_id(raw_post_id: str | None) -> str:
     return (raw_post_id or "").strip()[:128]
 
@@ -3061,6 +3114,55 @@ def uploads(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
+@app.route("/api/admin/export-store")
+def export_store():
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    if not os.path.exists(STORE_ARCHIVE_PATH):
+        update_store_archive("sync-export")
+    if not os.path.exists(STORE_ARCHIVE_PATH):
+        return jsonify({"error": "store archive not found"}), 404
+    return send_file(
+        STORE_ARCHIVE_PATH,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="comment_store.zip",
+    )
+
+
+@app.route("/api/admin/import-store", methods=["POST"])
+def import_store():
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    file = request.files.get("archive")
+    if not file or not file.filename:
+        return jsonify({"error": "archive is required"}), 400
+    temp_path = STORE_ARCHIVE_PATH + ".upload"
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        file.save(temp_path)
+        current_count = count_comments_in_db(DB_PATH)
+        incoming_count = count_comments_in_archive(temp_path)
+        if incoming_count == 0 and current_count > 0:
+            return jsonify({"error": "incoming archive is empty", "db_comment_count": current_count}), 409
+        try:
+            with open(temp_path, "rb") as source_file:
+                archive_bytes = source_file.read()
+            with open(STORE_ARCHIVE_PATH, "wb") as target_file:
+                target_file.write(archive_bytes)
+        except OSError:
+            os.replace(temp_path, STORE_ARCHIVE_PATH)
+        if not import_store_archive(STORE_ARCHIVE_PATH):
+            return jsonify({"error": "failed to import archive"}), 500
+        return jsonify({"status": "success", "db_comment_count": count_comments_in_db(DB_PATH)})
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
 @app.route("/health")
 def health():
     backups = []
@@ -3073,9 +3175,12 @@ def health():
     return jsonify(
         {
             "status": "ok",
+            "data_dir": DATA_DIR,
             "db_exists": os.path.exists(DB_PATH),
+            "db_comment_count": count_comments_in_db(DB_PATH),
             "store_db_exists": os.path.exists(STORE_DB_PATH),
             "store_db_path": STORE_DB_PATH,
+            "store_db_comment_count": count_comments_in_db(STORE_DB_PATH),
             "store_archive_exists": os.path.exists(STORE_ARCHIVE_PATH),
             "store_archive_path": STORE_ARCHIVE_PATH,
             "backup_dir": BACKUP_DIR,
