@@ -993,6 +993,34 @@ def upsert_channel(chat_id: str, title: str = "", avatar_url: str = "", is_block
     conn.close()
 
 
+def _channel_needs_refresh(title: str, chat_id: str, avatar_url: str = "") -> bool:
+    normalized_title = str(title or "").strip()
+    normalized_chat_id = str(chat_id or "").strip()
+    normalized_avatar = str(avatar_url or "").strip()
+    return not normalized_title or normalized_title == normalized_chat_id or not normalized_avatar
+
+
+def hydrate_channel_info(channel: dict) -> dict:
+    if not channel:
+        return channel
+    chat_id = str(channel.get("chat_id") or "").strip()
+    if not chat_id:
+        return channel
+    title = str(channel.get("title") or "").strip()
+    avatar_url = str(channel.get("avatar_url") or "").strip()
+    if not _channel_needs_refresh(title, chat_id, avatar_url):
+        return channel
+    chat_info = fetch_chat_info(chat_id) or {}
+    refreshed_title = (chat_info.get("title") or title or chat_id).strip()
+    refreshed_avatar_url = (chat_info.get("avatar_url") or avatar_url or "").strip()
+    if refreshed_title != title or refreshed_avatar_url != avatar_url:
+        upsert_channel(chat_id, title=refreshed_title, avatar_url=refreshed_avatar_url, is_blocked=1 if channel.get("is_blocked") else 0)
+    updated_channel = dict(channel)
+    updated_channel["title"] = refreshed_title
+    updated_channel["avatar_url"] = refreshed_avatar_url
+    return updated_channel
+
+
 def list_channels() -> list[dict]:
     conn = get_db_connection()
     rows = conn.execute(
@@ -1006,7 +1034,7 @@ def list_channels() -> list[dict]:
         """
     ).fetchall()
     conn.close()
-    return [
+    channels = [
         {
             "chat_id": row["chat_id"],
             "title": row["title"] or row["chat_id"],
@@ -1018,6 +1046,7 @@ def list_channels() -> list[dict]:
         }
         for row in rows
     ]
+    return [hydrate_channel_info(channel) for channel in channels]
 
 
 def normalize_stats_period(raw_period: str | None) -> str:
@@ -1047,12 +1076,12 @@ def get_channel_stats(chat_id: str | None = None, period: str = "week") -> dict:
     if normalized_chat_id:
         channel_filter = " AND posts.source_chat_id = ?"
         channel_params = [normalized_chat_id]
-        channel = get_channel_info(normalized_chat_id) or {
+        channel = hydrate_channel_info(get_channel_info(normalized_chat_id) or {
             "chat_id": normalized_chat_id,
             "title": normalized_chat_id,
             "avatar_url": "",
             "is_blocked": False,
-        }
+        })
     else:
         channel_filter = ""
         channel_params = []
