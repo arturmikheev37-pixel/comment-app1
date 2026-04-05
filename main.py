@@ -11,6 +11,7 @@ import threading
 import uuid
 import zipfile
 from urllib.parse import parse_qsl, quote
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, render_template_string, request, send_file, send_from_directory
@@ -1404,7 +1405,14 @@ def refresh_post_button(post_id: str):
         with urlopen(req, timeout=10) as response:
             response.read()
     except Exception as error:
-        print(f"Не удалось обновить кнопку комментариев для {post_id[:32]}: {error}")
+        if isinstance(error, HTTPError):
+            try:
+                details = error.read().decode("utf-8", errors="replace")[:400]
+            except Exception:
+                details = str(error)
+            print(f"Не удалось обновить кнопку комментариев для {post_id[:32]}: HTTP {error.code} {details}")
+        else:
+            print(f"Не удалось обновить кнопку комментариев для {post_id[:32]}: {error}")
 
 
 HTML_TEMPLATE = """
