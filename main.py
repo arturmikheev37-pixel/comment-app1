@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime, timezone
 import hmac
 import hashlib
@@ -586,6 +587,59 @@ def normalize_post_id(raw_post_id: str | None) -> str:
     return (raw_post_id or "").strip()[:128]
 
 
+def encode_post_payload(raw_post_id: str | None) -> str:
+    normalized = normalize_post_id(raw_post_id)
+    if not normalized:
+        return ""
+    return base64.urlsafe_b64encode(normalized.encode("utf-8")).decode("ascii").rstrip("=")[:128]
+
+
+def decode_post_payload(raw_post_id: str | None) -> str:
+    normalized = normalize_post_id(raw_post_id)
+    if not normalized or normalized.startswith("mid."):
+        return normalized if normalized.startswith("mid.") else ""
+    try:
+        padding = "=" * (-len(normalized) % 4)
+        decoded = base64.urlsafe_b64decode((normalized + padding).encode("ascii")).decode("utf-8")
+    except Exception:
+        return ""
+    return normalize_post_id(decoded)
+
+
+def get_post_id_candidates(raw_post_id: str | None) -> list[str]:
+    normalized = normalize_post_id(raw_post_id)
+    if not normalized:
+        return []
+    candidates: list[str] = []
+
+    def add(candidate: str | None):
+        candidate = normalize_post_id(candidate)
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    add(normalized)
+    decoded = decode_post_payload(normalized)
+    add(decoded)
+    if normalized.startswith("mid."):
+        add(encode_post_payload(normalized))
+    if decoded.startswith("mid."):
+        add(encode_post_payload(decoded))
+    return candidates
+
+
+def get_preferred_post_storage_id(raw_post_id: str | None) -> str:
+    normalized = normalize_post_id(raw_post_id)
+    if not normalized:
+        return ""
+    if normalized.startswith("mid."):
+        encoded = encode_post_payload(normalized)
+        return encoded or normalized
+    decoded = decode_post_payload(normalized)
+    if decoded.startswith("mid."):
+        return normalized
+    return normalized
+
+
 def normalize_comment(raw_comment: str | None) -> str:
     return (raw_comment or "").strip()[:1000]
 
@@ -810,14 +864,78 @@ def get_post_info(post_id: str) -> dict | None:
     }
 
 
+def build_placeholder_post_info(post_id: str, source_post_id: str | None = None) -> dict:
+    normalized_post_id = normalize_post_id(post_id)
+    normalized_source_post_id = normalize_post_id(source_post_id)
+    if not normalized_source_post_id:
+        decoded = decode_post_payload(normalized_post_id)
+        normalized_source_post_id = decoded if decoded.startswith("mid.") else ""
+    return {
+        "post_id": normalized_post_id,
+        "source_post_id": normalized_source_post_id,
+        "source_chat_id": "",
+        "button_message_id": "",
+        "counter_enabled": 0,
+        "post_text": "",
+        "message_text": "",
+        "attachments_json": "[]",
+        "created_at": "",
+        "channel_title": "",
+        "channel_avatar_url": "",
+        "channel_is_blocked": False,
+    }
+
+
 def resolve_post_id(post_id: str) -> str:
-    normalized = normalize_post_id(post_id)
-    if not normalized:
+    candidates = get_post_id_candidates(post_id)
+    if not candidates:
         return ""
-    post = get_post_info(normalized)
-    if post and post.get("post_id"):
-        return str(post["post_id"])
-    return normalized
+    for candidate in candidates:
+        post = get_post_info(candidate)
+        if post and post.get("post_id"):
+            return str(post["post_id"])
+
+    preferred = get_preferred_post_storage_id(post_id)
+    conn = get_db_connection()
+    for candidate in [preferred] + [item for item in candidates if item != preferred]:
+        row = conn.execute("SELECT COUNT(*) AS count FROM comments WHERE post_id = ?", (candidate,)).fetchone()
+        if row and int(row["count"] or 0) > 0:
+            conn.close()
+            return candidate
+    conn.close()
+    return preferred
+
+
+def ensure_post_record(post_id: str, source_post_id: str | None = None) -> dict | None:
+    normalized_post_id = resolve_post_id(post_id)
+    if not normalized_post_id:
+        return None
+    post = get_post_info(normalized_post_id)
+    if post:
+        return post
+
+    placeholder = build_placeholder_post_info(normalized_post_id, source_post_id=source_post_id or post_id)
+    conn = get_db_connection()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            placeholder["post_id"],
+            placeholder["source_post_id"],
+            placeholder["source_chat_id"],
+            placeholder["button_message_id"],
+            placeholder["counter_enabled"],
+            placeholder["post_text"],
+            placeholder["message_text"],
+            placeholder["attachments_json"],
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return get_post_info(normalized_post_id) or placeholder
 
 
 def get_channel_info(chat_id: str) -> dict | None:
@@ -3373,7 +3491,10 @@ def get_comments_by_post(post_id):
         comment["can_edit"] = is_owner
         comment["can_delete"] = is_owner or viewer_is_admin
         comments.append(comment)
-    post_info = get_post_info(normalized_post_id) or {}
+    post_info = get_post_info(normalized_post_id)
+    if not post_info and rows:
+        post_info = build_placeholder_post_info(normalized_post_id, source_post_id=post_id)
+    post_info = post_info or {}
     post_info["viewer_can_post_as_channel"] = bool(viewer_is_admin and post_info.get("source_chat_id"))
     return jsonify({"post_id": normalized_post_id, "post": post_info, "comments": comments})
 
@@ -3392,7 +3513,8 @@ def get_post_count(post_id):
 @app.route("/api/comment", methods=["POST"])
 def add_comment():
     payload, files = parse_request_payload()
-    post_id = resolve_post_id(payload.get("post_id"))
+    original_post_id = payload.get("post_id")
+    post_id = resolve_post_id(original_post_id)
     comment = normalize_comment(payload.get("comment"))
     parent_id = payload.get("parent_id")
     post_as_channel = str(payload.get("post_as_channel") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -3410,6 +3532,8 @@ def add_comment():
         return jsonify({"error": "Комментарий пустой"}), 400
 
     post = get_post_info(post_id)
+    if not post:
+        post = ensure_post_record(post_id, source_post_id=original_post_id)
     if not post:
         return jsonify({"error": "Пост не найден"}), 404
     source_chat_id = str(post.get("source_chat_id") or "").strip()
@@ -3623,7 +3747,14 @@ def admin_post_lookup(post_id):
     if not require_sync_secret():
         return jsonify({"error": "forbidden"}), 403
     resolved_post_id = resolve_post_id(post_id)
-    return jsonify({"post": get_post_info(resolved_post_id) if resolved_post_id else None})
+    post = get_post_info(resolved_post_id) if resolved_post_id else None
+    if not post and resolved_post_id:
+        conn = get_db_connection()
+        row = conn.execute("SELECT COUNT(*) AS count FROM comments WHERE post_id = ?", (resolved_post_id,)).fetchone()
+        conn.close()
+        if row and int(row["count"] or 0) > 0:
+            post = build_placeholder_post_info(resolved_post_id, source_post_id=post_id)
+    return jsonify({"post": post})
 
 
 @app.route("/api/admin/channels/<path:chat_id>/block", methods=["POST"])
