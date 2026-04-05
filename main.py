@@ -983,6 +983,7 @@ def refresh_post_button(post_id: str):
             attachments = []
     except json.JSONDecodeError:
         attachments = []
+    attachments = [attachment for attachment in attachments if isinstance(attachment, dict) and attachment.get("type") != "inline_keyboard"]
 
     attachments.append(
         {
@@ -1008,7 +1009,7 @@ def refresh_post_button(post_id: str):
     # ИСПРАВЛЕНО: убран access_token из URL, message_id перенесён в путь, добавлен заголовок Authorization
     try:
         req = Request(
-            url=f"https://botapi.max.ru/messages/{target_message_id}",
+            url=f"https://platform-api.max.ru/messages?message_id={quote(str(target_message_id), safe='')}",
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
@@ -3220,6 +3221,23 @@ def import_store():
                 os.remove(temp_path)
             except OSError:
                 pass
+
+
+@app.route("/api/admin/chats")
+def export_known_chats():
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    conn = get_db_connection()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT source_chat_id
+        FROM posts
+        WHERE TRIM(COALESCE(source_chat_id, '')) <> ''
+        ORDER BY source_chat_id
+        """
+    ).fetchall()
+    conn.close()
+    return jsonify({"chat_ids": [str(row["source_chat_id"]) for row in rows]})
 
 
 @app.route("/health")
