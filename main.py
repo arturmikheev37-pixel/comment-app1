@@ -1,4 +1,3 @@
-import base64
 from datetime import datetime, timezone
 import hmac
 import hashlib
@@ -568,13 +567,7 @@ def import_store_archive(archive_path: str) -> bool:
 
 
 def normalize_post_id(raw_post_id: str | None) -> str:
-    value = (raw_post_id or "").strip()
-    if not value:
-        return ""
-    if value.startswith("mid."):
-        encoded = base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
-        return encoded[:128]
-    return value[:128]
+    return (raw_post_id or "").strip()[:128]
 
 
 def normalize_comment(raw_comment: str | None) -> str:
@@ -1217,7 +1210,7 @@ def refresh_post_button(post_id: str):
     count_row = conn.execute("SELECT COUNT(*) AS count FROM comments WHERE post_id = ?", (post_id,)).fetchone()
     conn.close()
     count = count_row["count"] if count_row else 0
-    button_text = f"💬 Комментарии ({count})" if count else "💬 Комментарии ↗"
+    button_text = f"Комментарии ({count})" if count else "Открыть комментарии"
 
     try:
         attachments = json.loads(post.get("attachments_json") or "[]")
