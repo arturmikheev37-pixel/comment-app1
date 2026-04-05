@@ -207,7 +207,10 @@ def init_db():
             chat_id TEXT PRIMARY KEY,
             title TEXT NOT NULL DEFAULT '',
             avatar_url TEXT NOT NULL DEFAULT '',
+            owner_user_id TEXT NOT NULL DEFAULT '',
+            owner_username TEXT NOT NULL DEFAULT '',
             is_blocked INTEGER NOT NULL DEFAULT 0,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT ''
         )
@@ -293,8 +296,14 @@ def init_db():
         cursor.execute("ALTER TABLE user_settings ADD COLUMN consent_accepted INTEGER NOT NULL DEFAULT 0")
     if "avatar_url" not in channel_columns:
         cursor.execute("ALTER TABLE channels ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''")
+    if "owner_user_id" not in channel_columns:
+        cursor.execute("ALTER TABLE channels ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''")
+    if "owner_username" not in channel_columns:
+        cursor.execute("ALTER TABLE channels ADD COLUMN owner_username TEXT NOT NULL DEFAULT ''")
     if "is_blocked" not in channel_columns:
         cursor.execute("ALTER TABLE channels ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0")
+    if "is_deleted" not in channel_columns:
+        cursor.execute("ALTER TABLE channels ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
     if "created_at" not in channel_columns:
         cursor.execute("ALTER TABLE channels ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
     if "updated_at" not in channel_columns:
@@ -946,7 +955,7 @@ def get_channel_info(chat_id: str) -> dict | None:
 
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT chat_id, title, avatar_url, is_blocked, created_at, updated_at FROM channels WHERE chat_id = ?",
+        "SELECT chat_id, title, avatar_url, owner_user_id, owner_username, is_blocked, is_deleted, created_at, updated_at FROM channels WHERE chat_id = ?",
         (normalized_chat_id,),
     ).fetchone()
     conn.close()
@@ -956,35 +965,57 @@ def get_channel_info(chat_id: str) -> dict | None:
         "chat_id": row["chat_id"],
         "title": row["title"] or "",
         "avatar_url": row["avatar_url"] or "",
+        "owner_user_id": row["owner_user_id"] or "",
+        "owner_username": row["owner_username"] or "",
         "is_blocked": bool(row["is_blocked"]),
+        "is_deleted": bool(row["is_deleted"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
 
 
-def upsert_channel(chat_id: str, title: str = "", avatar_url: str = "", is_blocked: int | None = None):
+def upsert_channel(
+    chat_id: str,
+    title: str = "",
+    avatar_url: str = "",
+    owner_user_id: str = "",
+    owner_username: str = "",
+    is_blocked: int | None = None,
+    is_deleted: int | None = None,
+):
     normalized_chat_id = str(chat_id or "").strip()[:256]
     if not normalized_chat_id:
         return
     existing = get_channel_info(normalized_chat_id)
     now = datetime.now(timezone.utc).isoformat()
     final_blocked = int(existing["is_blocked"]) if existing and is_blocked is None else int(1 if is_blocked else 0)
+    final_deleted = int(existing["is_deleted"]) if existing and is_deleted is None else int(1 if is_deleted else 0)
     conn = get_db_connection()
     conn.execute(
         """
-        INSERT INTO channels (chat_id, title, avatar_url, is_blocked, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO channels (chat_id, title, avatar_url, owner_user_id, owner_username, is_blocked, is_deleted, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(chat_id) DO UPDATE SET
             title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE channels.title END,
             avatar_url = CASE WHEN excluded.avatar_url <> '' THEN excluded.avatar_url ELSE channels.avatar_url END,
+            owner_user_id = CASE WHEN channels.owner_user_id = '' AND excluded.owner_user_id <> '' THEN excluded.owner_user_id ELSE channels.owner_user_id END,
+            owner_username = CASE
+                WHEN channels.owner_user_id = '' AND excluded.owner_username <> '' THEN excluded.owner_username
+                WHEN channels.owner_user_id = excluded.owner_user_id AND excluded.owner_username <> '' THEN excluded.owner_username
+                ELSE channels.owner_username
+            END,
             is_blocked = excluded.is_blocked,
+            is_deleted = excluded.is_deleted,
             updated_at = excluded.updated_at
         """,
         (
             normalized_chat_id,
             (title or "").strip()[:255],
             (avatar_url or "").strip()[:1000],
+            str(owner_user_id or "").strip()[:128],
+            (owner_username or "").strip()[:255],
             final_blocked,
+            final_deleted,
             existing["created_at"] if existing else now,
             now,
         ),
@@ -1021,17 +1052,28 @@ def hydrate_channel_info(channel: dict) -> dict:
     return updated_channel
 
 
-def list_channels() -> list[dict]:
+def list_channels(owner_user_id: str | None = None, include_deleted: bool = False) -> list[dict]:
+    normalized_owner_user_id = str(owner_user_id or "").strip()
     conn = get_db_connection()
+    where_parts = []
+    params: list[str] = []
+    if normalized_owner_user_id:
+        where_parts.append("channels.owner_user_id = ?")
+        params.append(normalized_owner_user_id)
+    if not include_deleted:
+        where_parts.append("COALESCE(channels.is_deleted, 0) = 0")
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
     rows = conn.execute(
-        """
-        SELECT channels.chat_id, channels.title, channels.avatar_url, channels.is_blocked, channels.created_at, channels.updated_at,
+        f"""
+        SELECT channels.chat_id, channels.title, channels.avatar_url, channels.owner_user_id, channels.owner_username, channels.is_blocked, channels.is_deleted, channels.created_at, channels.updated_at,
                COUNT(posts.post_id) AS posts_count
         FROM channels
         LEFT JOIN posts ON posts.source_chat_id = channels.chat_id
-        GROUP BY channels.chat_id, channels.title, channels.avatar_url, channels.is_blocked, channels.created_at, channels.updated_at
+        {where_sql}
+        GROUP BY channels.chat_id, channels.title, channels.avatar_url, channels.owner_user_id, channels.owner_username, channels.is_blocked, channels.is_deleted, channels.created_at, channels.updated_at
         ORDER BY channels.updated_at DESC, channels.chat_id DESC
-        """
+        """,
+        params,
     ).fetchall()
     conn.close()
     channels = [
@@ -1039,7 +1081,10 @@ def list_channels() -> list[dict]:
             "chat_id": row["chat_id"],
             "title": row["title"] or row["chat_id"],
             "avatar_url": row["avatar_url"] or "",
+            "owner_user_id": row["owner_user_id"] or "",
+            "owner_username": row["owner_username"] or "",
             "is_blocked": bool(row["is_blocked"]),
+            "is_deleted": bool(row["is_deleted"]),
             "posts_count": int(row["posts_count"] or 0),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -1064,14 +1109,19 @@ def _safe_post_label(post_row: sqlite3.Row | dict) -> str:
     return " ".join(label.split())[:80]
 
 
-def get_channel_stats(chat_id: str | None = None, period: str = "week") -> dict:
+def get_channel_stats(chat_id: str | None = None, period: str = "week", owner_user_id: str | None = None) -> dict:
     normalized_chat_id = str(chat_id or "").strip()
+    normalized_owner_user_id = str(owner_user_id or "").strip()
     normalized_period = normalize_stats_period(period)
     days = 30 if normalized_period == "month" else 7
     now = datetime.now(timezone.utc)
     since_dt = now - timedelta(days=days)
     since_iso = since_dt.isoformat()
     conn = get_db_connection()
+
+    channel_join = "JOIN channels ON channels.chat_id = posts.source_chat_id"
+    owner_filter = " AND channels.owner_user_id = ?" if normalized_owner_user_id else ""
+    deleted_filter = " AND COALESCE(channels.is_deleted, 0) = 0"
 
     if normalized_chat_id:
         channel_filter = " AND posts.source_chat_id = ?"
@@ -1080,8 +1130,23 @@ def get_channel_stats(chat_id: str | None = None, period: str = "week") -> dict:
             "chat_id": normalized_chat_id,
             "title": normalized_chat_id,
             "avatar_url": "",
+            "owner_user_id": "",
+            "owner_username": "",
             "is_blocked": False,
+            "is_deleted": False,
         })
+        if normalized_owner_user_id and str(channel.get("owner_user_id") or "").strip() not in {"", normalized_owner_user_id}:
+            channel = {
+                "chat_id": normalized_chat_id,
+                "title": normalized_chat_id,
+                "avatar_url": "",
+                "owner_user_id": normalized_owner_user_id,
+                "owner_username": "",
+                "is_blocked": False,
+                "is_deleted": False,
+            }
+            channel_filter = " AND 1 = 0"
+            channel_params = []
     else:
         channel_filter = ""
         channel_params = []
@@ -1093,9 +1158,10 @@ def get_channel_stats(chat_id: str | None = None, period: str = "week") -> dict:
             COUNT(*) AS posts_count,
             SUM(CASE WHEN counter_enabled = 1 THEN 1 ELSE 0 END) AS counter_enabled_posts_count
         FROM posts
-        WHERE created_at >= ? {channel_filter}
+        {channel_join}
+        WHERE posts.created_at >= ? {channel_filter}{owner_filter}{deleted_filter}
         """,
-        [since_iso, *channel_params],
+        [since_iso, *channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
     ).fetchone()
 
     comments_row = conn.execute(
@@ -1108,9 +1174,10 @@ def get_channel_stats(chat_id: str | None = None, period: str = "week") -> dict:
             SUM(CASE WHEN comments.author_type = 'channel' THEN 1 ELSE 0 END) AS channel_comments_count
         FROM comments
         JOIN posts ON posts.post_id = comments.post_id
-        WHERE comments.created_at >= ? {channel_filter}
+        {channel_join}
+        WHERE comments.created_at >= ? {channel_filter}{owner_filter}{deleted_filter}
         """,
-        [since_iso, *channel_params],
+        [since_iso, *channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
     ).fetchone()
 
     lifetime_row = conn.execute(
@@ -1120,18 +1187,20 @@ def get_channel_stats(chat_id: str | None = None, period: str = "week") -> dict:
             COUNT(DISTINCT comments.user_id) AS commenters_total
         FROM comments
         JOIN posts ON posts.post_id = comments.post_id
-        WHERE 1 = 1 {channel_filter}
+        {channel_join}
+        WHERE 1 = 1 {channel_filter}{owner_filter}{deleted_filter}
         """,
-        channel_params,
+        [*channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
     ).fetchone()
 
     active_channels_row = conn.execute(
-        """
+        f"""
         SELECT COUNT(DISTINCT source_chat_id) AS active_channels
         FROM posts
-        WHERE created_at >= ? AND TRIM(COALESCE(source_chat_id, '')) <> ''
+        {channel_join}
+        WHERE posts.created_at >= ? AND TRIM(COALESCE(source_chat_id, '')) <> ''{owner_filter}{deleted_filter}
         """,
-        (since_iso,),
+        [since_iso, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
     ).fetchone()
 
     top_posts_rows = conn.execute(
@@ -1144,16 +1213,17 @@ def get_channel_stats(chat_id: str | None = None, period: str = "week") -> dict:
             COUNT(comments.id) AS comments_count,
             MAX(comments.created_at) AS last_comment_at
         FROM posts
+        {channel_join}
         LEFT JOIN comments
             ON comments.post_id = posts.post_id
            AND comments.created_at >= ?
-        WHERE 1 = 1 {channel_filter}
+        WHERE 1 = 1 {channel_filter}{owner_filter}{deleted_filter}
         GROUP BY posts.post_id, posts.source_post_id, posts.post_text, posts.message_text
         HAVING comments_count > 0
         ORDER BY comments_count DESC, last_comment_at DESC
         LIMIT 5
         """,
-        [since_iso, *channel_params],
+        [since_iso, *channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
     ).fetchall()
 
     top_commenters_rows = conn.execute(
@@ -1166,12 +1236,13 @@ def get_channel_stats(chat_id: str | None = None, period: str = "week") -> dict:
             MAX(comments.created_at) AS last_comment_at
         FROM comments
         JOIN posts ON posts.post_id = comments.post_id
-        WHERE comments.created_at >= ? {channel_filter}
+        {channel_join}
+        WHERE comments.created_at >= ? {channel_filter}{owner_filter}{deleted_filter}
         GROUP BY comments.user_id, comments.username, comments.author_type
         ORDER BY comments_count DESC, last_comment_at DESC
         LIMIT 5
         """,
-        [since_iso, *channel_params],
+        [since_iso, *channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
     ).fetchall()
 
     activity_rows = conn.execute(
@@ -1181,11 +1252,12 @@ def get_channel_stats(chat_id: str | None = None, period: str = "week") -> dict:
             COUNT(*) AS comments_count
         FROM comments
         JOIN posts ON posts.post_id = comments.post_id
-        WHERE comments.created_at >= ? {channel_filter}
+        {channel_join}
+        WHERE comments.created_at >= ? {channel_filter}{owner_filter}{deleted_filter}
         GROUP BY SUBSTR(comments.created_at, 1, 10)
         ORDER BY day ASC
         """,
-        [since_iso, *channel_params],
+        [since_iso, *channel_params, *(([normalized_owner_user_id] if normalized_owner_user_id else []))],
     ).fetchall()
     conn.close()
 
@@ -1262,7 +1334,31 @@ def set_channel_block(chat_id: str, is_blocked: bool):
     if not channel:
         upsert_channel(chat_id, title="", avatar_url="", is_blocked=1 if is_blocked else 0)
     else:
-        upsert_channel(chat_id, title=channel["title"], avatar_url=channel["avatar_url"], is_blocked=1 if is_blocked else 0)
+        upsert_channel(
+            chat_id,
+            title=channel["title"],
+            avatar_url=channel["avatar_url"],
+            owner_user_id=channel.get("owner_user_id", ""),
+            owner_username=channel.get("owner_username", ""),
+            is_blocked=1 if is_blocked else 0,
+            is_deleted=1 if channel.get("is_deleted") else 0,
+        )
+
+
+def set_channel_deleted(chat_id: str, is_deleted: bool):
+    channel = get_channel_info(chat_id)
+    if not channel:
+        upsert_channel(chat_id, title="", avatar_url="", is_blocked=1 if is_deleted else 0, is_deleted=1 if is_deleted else 0)
+    else:
+        upsert_channel(
+            chat_id,
+            title=channel["title"],
+            avatar_url=channel["avatar_url"],
+            owner_user_id=channel.get("owner_user_id", ""),
+            owner_username=channel.get("owner_username", ""),
+            is_blocked=1 if is_deleted else int(1 if channel.get("is_blocked") else 0),
+            is_deleted=1 if is_deleted else 0,
+        )
 
 
 def upsert_user_settings(user: dict, notifications_enabled: int | None = None, consent_accepted: int | None = None):
@@ -3663,6 +3759,8 @@ def register_post():
     message_text = (payload.get("message_text") or "").strip()[:4000]
     channel_title = (payload.get("channel_title") or "").strip()[:255]
     channel_avatar_url = (payload.get("channel_avatar_url") or "").strip()[:1000]
+    owner_user_id = str(payload.get("owner_user_id") or "").strip()[:128]
+    owner_username = (payload.get("owner_username") or "").strip()[:255]
     attachments_json = payload.get("attachments") or []
     if not isinstance(attachments_json, list):
         attachments_json = []
@@ -3674,6 +3772,8 @@ def register_post():
             source_chat_id,
             title=channel_title or (chat_info or {}).get("title", ""),
             avatar_url=channel_avatar_url or (chat_info or {}).get("avatar_url", ""),
+            owner_user_id=owner_user_id,
+            owner_username=owner_username,
         )
         channel = get_channel_info(source_chat_id)
         if channel and channel.get("is_blocked"):
@@ -3984,7 +4084,9 @@ def export_known_chats():
 def admin_channels():
     if not require_sync_secret():
         return jsonify({"error": "forbidden"}), 403
-    return jsonify({"channels": list_channels()})
+    owner_user_id = str(request.args.get("owner_user_id") or "").strip()
+    include_deleted = str(request.args.get("include_deleted") or "").strip().lower() in {"1", "true", "yes", "on"}
+    return jsonify({"channels": list_channels(owner_user_id=owner_user_id or None, include_deleted=include_deleted)})
 
 
 @app.route("/api/admin/stats")
@@ -3993,7 +4095,8 @@ def admin_stats():
         return jsonify({"error": "forbidden"}), 403
     chat_id = str(request.args.get("chat_id") or "").strip()
     period = normalize_stats_period(request.args.get("period"))
-    return jsonify(get_channel_stats(chat_id=chat_id or None, period=period))
+    owner_user_id = str(request.args.get("owner_user_id") or "").strip()
+    return jsonify(get_channel_stats(chat_id=chat_id or None, period=period, owner_user_id=owner_user_id or None))
 
 
 @app.route("/api/admin/post/<path:post_id>")
@@ -4017,11 +4120,56 @@ def admin_block_channel(chat_id):
         return jsonify({"error": "forbidden"}), 403
     payload = request.get_json(silent=True) or {}
     is_blocked = bool(payload.get("blocked", True))
+    is_deleted = bool(payload.get("deleted", False))
+    owner_user_id = str(payload.get("owner_user_id") or "").strip()[:128]
+    owner_username = (payload.get("owner_username") or "").strip()[:255]
     channel_info = fetch_chat_info(chat_id) or {}
-    upsert_channel(chat_id, title=channel_info.get("title", ""), avatar_url=channel_info.get("avatar_url", ""), is_blocked=1 if is_blocked else 0)
+    upsert_channel(
+        chat_id,
+        title=channel_info.get("title", ""),
+        avatar_url=channel_info.get("avatar_url", ""),
+        owner_user_id=owner_user_id,
+        owner_username=owner_username,
+        is_blocked=1 if is_blocked else 0,
+        is_deleted=1 if is_deleted else 0,
+    )
     sync_store_db("channel-block")
     update_store_archive("channel-block")
     create_backup("channel-block")
+    return jsonify({"status": "success", "channel": get_channel_info(chat_id)})
+
+
+@app.route("/api/admin/channels/<path:chat_id>/delete", methods=["POST"])
+def admin_delete_channel(chat_id):
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    set_channel_deleted(chat_id, True)
+    sync_store_db("channel-delete")
+    update_store_archive("channel-delete")
+    create_backup("channel-delete")
+    return jsonify({"status": "success", "channel": get_channel_info(chat_id)})
+
+
+@app.route("/api/admin/channels/<path:chat_id>/restore", methods=["POST"])
+def admin_restore_channel(chat_id):
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    payload = request.get_json(silent=True) or {}
+    owner_user_id = str(payload.get("owner_user_id") or "").strip()[:128]
+    owner_username = (payload.get("owner_username") or "").strip()[:255]
+    channel_info = fetch_chat_info(chat_id) or {}
+    upsert_channel(
+        chat_id,
+        title=channel_info.get("title", ""),
+        avatar_url=channel_info.get("avatar_url", ""),
+        owner_user_id=owner_user_id,
+        owner_username=owner_username,
+        is_blocked=0,
+        is_deleted=0,
+    )
+    sync_store_db("channel-restore")
+    update_store_archive("channel-restore")
+    create_backup("channel-restore")
     return jsonify({"status": "success", "channel": get_channel_info(chat_id)})
 
 
