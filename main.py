@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime, timezone
 import hmac
 import hashlib
@@ -567,7 +568,13 @@ def import_store_archive(archive_path: str) -> bool:
 
 
 def normalize_post_id(raw_post_id: str | None) -> str:
-    return (raw_post_id or "").strip()[:128]
+    value = (raw_post_id or "").strip()
+    if not value:
+        return ""
+    if value.startswith("mid."):
+        encoded = base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+        return encoded[:128]
+    return value[:128]
 
 
 def normalize_comment(raw_comment: str | None) -> str:
