@@ -1210,7 +1210,7 @@ def refresh_post_button(post_id: str):
     count_row = conn.execute("SELECT COUNT(*) AS count FROM comments WHERE post_id = ?", (post_id,)).fetchone()
     conn.close()
     count = count_row["count"] if count_row else 0
-    button_text = f"Комментарии ({count})" if count else "Открыть комментарии"
+    button_text = f"💬 Комментарии ({count})" if count else "💬 Комментарии ↗"
 
     try:
         attachments = json.loads(post.get("attachments_json") or "[]")
