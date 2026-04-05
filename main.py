@@ -1109,10 +1109,33 @@ def user_can_moderate_comment(user_id: str, post_id: str) -> bool:
     return is_chat_admin(source_chat_id, str(user_id))
 
 
+def _build_comment_preview(actor_comment: str) -> str:
+    return (actor_comment or "").strip() or "Фото/видео"
+
+
+def send_bot_private_message(target_user_id: str, payload: dict):
+    if not BOT_TOKEN or not target_user_id:
+        return
+    try:
+        req = Request(
+            url=f"https://botapi.max.ru/messages?user_id={quote(str(target_user_id), safe='')}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": BOT_TOKEN,
+            },
+            method="POST",
+        )
+        with urlopen(req, timeout=10) as response:
+            response.read()
+    except Exception as error:
+        print(f"Не удалось отправить личное сообщение пользователю {str(target_user_id)[:32]}: {error}")
+
+
 def send_reply_notification(target_user_id: str, actor_name: str, actor_comment: str, post_id: str):
     if not BOT_TOKEN or not target_user_id:
         return
-    preview = (actor_comment or "").strip() or "Фото/видео"
+    preview = _build_comment_preview(actor_comment)
     text = f"Вам ответили в комментариях.\n\n{actor_name}: {preview[:300]}"
     payload = {
         "text": text,
@@ -1133,21 +1156,7 @@ def send_reply_notification(target_user_id: str, actor_name: str, actor_comment:
         ],
     }
 
-    # ИСПРАВЛЕНО: убран access_token из URL, добавлен заголовок Authorization
-    try:
-        req = Request(
-            url=f"https://botapi.max.ru/messages?user_id={target_user_id}",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": BOT_TOKEN
-            },
-            method="POST",
-        )
-        with urlopen(req, timeout=10) as response:
-            response.read()
-    except Exception as error:
-        print(f"Не удалось отправить уведомление пользователю {target_user_id[:32]}: {error}")
+    send_bot_private_message(target_user_id, payload)
 
 
 def send_channel_admin_notifications(post_id: str, actor_user_id: str, actor_name: str, actor_comment: str):
@@ -1158,8 +1167,11 @@ def send_channel_admin_notifications(post_id: str, actor_user_id: str, actor_nam
 
     channel = get_channel_info(source_chat_id) or {}
     channel_title = channel.get("title") or source_chat_id
-    preview = (actor_comment or "").strip() or "Фото/видео"
+    preview = _build_comment_preview(actor_comment)
+    post_preview = ((post or {}).get("post_text") or (post or {}).get("message_text") or "").strip()
     text = f"Новый комментарий в канале «{channel_title}».\n\n{actor_name}: {preview[:300]}"
+    if post_preview:
+        text = f"{text}\n\nПост: {post_preview[:200]}"
     payload = {
         "text": text,
         "notify": True,
@@ -1182,20 +1194,10 @@ def send_channel_admin_notifications(post_id: str, actor_user_id: str, actor_nam
     for admin_id in get_chat_admin_ids(source_chat_id):
         if str(admin_id) == str(actor_user_id):
             continue
-        try:
-            req = Request(
-                url=f"https://platform-api.max.ru/messages?chat_id={quote(str(admin_id), safe='')}",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": BOT_TOKEN
-                },
-                method="POST",
-            )
-            with urlopen(req, timeout=10) as response:
-                response.read()
-        except Exception as error:
-            print(f"Не удалось отправить админ-уведомление {str(admin_id)[:32]}: {error}")
+        target_settings = get_user_settings(admin_id)
+        if not target_settings.get("notifications_enabled", True):
+            continue
+        send_bot_private_message(admin_id, payload)
 
 
 def refresh_post_button(post_id: str):
