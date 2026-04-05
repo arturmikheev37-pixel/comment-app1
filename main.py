@@ -3,7 +3,9 @@ import hmac
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
+import tempfile
 import threading
 import uuid
 import zipfile
@@ -56,7 +58,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v"}
 ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MAX_VIDEO_BYTES = 80 * 1024 * 1024
-BACKUP_LOCK = threading.Lock()
+BACKUP_LOCK = threading.RLock()
 app.config["MAX_CONTENT_LENGTH"] = MAX_VIDEO_BYTES + (2 * 1024 * 1024)
 
 
@@ -324,6 +326,28 @@ def count_comments_in_db(db_path: str) -> int:
         return 0
 
 
+def count_comments_in_archive(archive_path: str) -> int:
+    if not os.path.exists(archive_path):
+        return 0
+    temp_dir = os.path.join(DATA_DIR, f"_archive_check_{uuid.uuid4().hex}")
+    try:
+        os.makedirs(temp_dir, exist_ok=True)
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            members = archive.namelist()
+            if "comments.db" not in members:
+                return 0
+            archive.extract("comments.db", temp_dir)
+            if "comments.db-wal" in members:
+                archive.extract("comments.db-wal", temp_dir)
+            if "comments.db-shm" in members:
+                archive.extract("comments.db-shm", temp_dir)
+        return count_comments_in_db(os.path.join(temp_dir, "comments.db"))
+    except Exception:
+        return 0
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def sync_store_db(reason: str = "sync") -> str | None:
     if not os.path.exists(DB_PATH):
         return None
@@ -462,20 +486,16 @@ def create_backup(reason: str = "manual") -> str | None:
 
     with BACKUP_LOCK:
         try:
-            wal_path = DB_PATH + "-wal"
-            shm_path = DB_PATH + "-shm"
+            sync_store_db(f"{reason}-backup")
+            source_db_path = STORE_DB_PATH if count_comments_in_db(STORE_DB_PATH) > 0 else DB_PATH
             manifest = {
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "reason": reason,
-                "db_path": DB_PATH,
+                "db_path": source_db_path,
                 "upload_dir": UPLOAD_DIR,
             }
             with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.write(DB_PATH, arcname="comments.db")
-                if os.path.exists(wal_path):
-                    archive.write(wal_path, arcname="comments.db-wal")
-                if os.path.exists(shm_path):
-                    archive.write(shm_path, arcname="comments.db-shm")
+                archive.write(source_db_path, arcname="comments.db")
                 if os.path.isdir(UPLOAD_DIR):
                     for root, _, files in os.walk(UPLOAD_DIR):
                         for file_name in files:
@@ -497,21 +517,17 @@ def update_store_archive(reason: str = "sync") -> str | None:
     temp_archive_path = STORE_ARCHIVE_PATH + ".tmp"
     with BACKUP_LOCK:
         try:
-            wal_path = DB_PATH + "-wal"
-            shm_path = DB_PATH + "-shm"
+            sync_store_db(f"{reason}-archive")
+            source_db_path = STORE_DB_PATH if count_comments_in_db(STORE_DB_PATH) > 0 else DB_PATH
             manifest = {
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "reason": reason,
-                "db_path": os.path.basename(DB_PATH),
+                "db_path": os.path.basename(source_db_path),
                 "uploads_dir": os.path.basename(UPLOAD_DIR),
                 "archive_type": "comment_store",
             }
             with zipfile.ZipFile(temp_archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.write(DB_PATH, arcname="comments.db")
-                if os.path.exists(wal_path):
-                    archive.write(wal_path, arcname="comments.db-wal")
-                if os.path.exists(shm_path):
-                    archive.write(shm_path, arcname="comments.db-shm")
+                archive.write(source_db_path, arcname="comments.db")
                 if os.path.isdir(UPLOAD_DIR):
                     for root, _, files in os.walk(UPLOAD_DIR):
                         for file_name in files:
@@ -769,6 +785,11 @@ def get_post_info(post_id: str) -> dict | None:
         "SELECT post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at FROM posts WHERE post_id = ?",
         (post_id,),
     ).fetchone()
+    if not row:
+        row = conn.execute(
+            "SELECT post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at FROM posts WHERE source_post_id = ?",
+            (post_id,),
+        ).fetchone()
     conn.close()
     if not row:
         return None
@@ -787,6 +808,16 @@ def get_post_info(post_id: str) -> dict | None:
         "channel_avatar_url": (channel or {}).get("avatar_url", ""),
         "channel_is_blocked": bool((channel or {}).get("is_blocked", False)),
     }
+
+
+def resolve_post_id(post_id: str) -> str:
+    normalized = normalize_post_id(post_id)
+    if not normalized:
+        return ""
+    post = get_post_info(normalized)
+    if post and post.get("post_id"):
+        return str(post["post_id"])
+    return normalized
 
 
 def get_channel_info(chat_id: str) -> dict | None:
@@ -3311,7 +3342,7 @@ def register_post():
 
 @app.route("/api/comments/<path:post_id>")
 def get_comments_by_post(post_id):
-    normalized_post_id = normalize_post_id(post_id)
+    normalized_post_id = resolve_post_id(post_id)
     if not normalized_post_id:
         return jsonify({"error": "?? ??????? post_id"}), 400
 
@@ -3349,7 +3380,7 @@ def get_comments_by_post(post_id):
 
 @app.route("/api/post_count/<path:post_id>")
 def get_post_count(post_id):
-    normalized_post_id = normalize_post_id(post_id)
+    normalized_post_id = resolve_post_id(post_id)
     if not normalized_post_id:
         return jsonify({"error": "Не передан post_id"}), 400
     conn = get_db_connection()
@@ -3361,7 +3392,7 @@ def get_post_count(post_id):
 @app.route("/api/comment", methods=["POST"])
 def add_comment():
     payload, files = parse_request_payload()
-    post_id = normalize_post_id(payload.get("post_id"))
+    post_id = resolve_post_id(payload.get("post_id"))
     comment = normalize_comment(payload.get("comment"))
     parent_id = payload.get("parent_id")
     post_as_channel = str(payload.get("post_as_channel") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -3541,7 +3572,17 @@ def import_store():
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         file.save(temp_path)
-        os.replace(temp_path, STORE_ARCHIVE_PATH)
+        current_count = count_comments_in_db(DB_PATH)
+        incoming_count = count_comments_in_archive(temp_path)
+        if incoming_count == 0 and current_count > 0:
+            return jsonify({"error": "incoming archive is empty", "db_comment_count": current_count}), 409
+        try:
+            with open(temp_path, "rb") as source_file:
+                archive_bytes = source_file.read()
+            with open(STORE_ARCHIVE_PATH, "wb") as target_file:
+                target_file.write(archive_bytes)
+        except OSError:
+            os.replace(temp_path, STORE_ARCHIVE_PATH)
         if not import_store_archive(STORE_ARCHIVE_PATH):
             return jsonify({"error": "failed to import archive"}), 500
         return jsonify({"status": "success", "db_comment_count": count_comments_in_db(DB_PATH)})
