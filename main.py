@@ -169,6 +169,8 @@ def init_db():
             post_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             username TEXT NOT NULL,
+            author_type TEXT NOT NULL DEFAULT 'user',
+            channel_chat_id TEXT,
             public_username TEXT,
             avatar_url TEXT,
             comment TEXT NOT NULL DEFAULT '',
@@ -195,12 +197,28 @@ def init_db():
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS channels (
+            chat_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            avatar_url TEXT NOT NULL DEFAULT '',
+            is_blocked INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
 
     comment_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(comments)").fetchall()}
     if "image_path" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN image_path TEXT")
     if "public_username" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN public_username TEXT")
+    if "author_type" not in comment_columns:
+        cursor.execute("ALTER TABLE comments ADD COLUMN author_type TEXT NOT NULL DEFAULT 'user'")
+    if "channel_chat_id" not in comment_columns:
+        cursor.execute("ALTER TABLE comments ADD COLUMN channel_chat_id TEXT")
     if "avatar_url" not in comment_columns:
         cursor.execute("ALTER TABLE comments ADD COLUMN avatar_url TEXT")
     if "media_path" not in comment_columns:
@@ -214,6 +232,7 @@ def init_db():
 
     post_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(posts)").fetchall()}
     user_settings_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(user_settings)").fetchall()}
+    channel_columns = {row["name"] for row in cursor.execute("PRAGMA table_info(channels)").fetchall()}
     if "source_post_id" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN source_post_id TEXT")
     if "source_chat_id" not in post_columns:
@@ -234,11 +253,25 @@ def init_db():
         cursor.execute("ALTER TABLE user_settings ADD COLUMN avatar_url TEXT")
     if "consent_accepted" not in user_settings_columns:
         cursor.execute("ALTER TABLE user_settings ADD COLUMN consent_accepted INTEGER NOT NULL DEFAULT 0")
+    if "avatar_url" not in channel_columns:
+        cursor.execute("ALTER TABLE channels ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''")
+    if "is_blocked" not in channel_columns:
+        cursor.execute("ALTER TABLE channels ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0")
+    if "created_at" not in channel_columns:
+        cursor.execute("ALTER TABLE channels ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+    if "updated_at" not in channel_columns:
+        cursor.execute("ALTER TABLE channels ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
 
     cursor.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_comments_post_created
         ON comments (post_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_posts_source_chat
+        ON posts (source_chat_id, created_at DESC)
         """
     )
     conn.commit()
@@ -680,6 +713,8 @@ def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> d
         "post_id": row["post_id"],
         "user_id": row["user_id"],
         "username": row["username"],
+        "author_type": row["author_type"] if "author_type" in row.keys() else "user",
+        "channel_chat_id": row["channel_chat_id"] if "channel_chat_id" in row.keys() else "",
         "public_username": row["public_username"] if "public_username" in row.keys() else "",
         "avatar_url": row["avatar_url"] if "avatar_url" in row.keys() else "",
         "comment": row["comment"],
@@ -703,6 +738,7 @@ def get_post_info(post_id: str) -> dict | None:
     conn.close()
     if not row:
         return None
+    channel = get_channel_info(row["source_chat_id"]) if row["source_chat_id"] else None
     return {
         "post_id": row["post_id"],
         "source_post_id": row["source_post_id"],
@@ -713,7 +749,109 @@ def get_post_info(post_id: str) -> dict | None:
         "message_text": row["message_text"],
         "attachments_json": row["attachments_json"],
         "created_at": row["created_at"],
+        "channel_title": (channel or {}).get("title", ""),
+        "channel_avatar_url": (channel or {}).get("avatar_url", ""),
+        "channel_is_blocked": bool((channel or {}).get("is_blocked", False)),
     }
+
+
+def get_channel_info(chat_id: str) -> dict | None:
+    normalized_chat_id = str(chat_id or "").strip()
+    if not normalized_chat_id:
+        return None
+    if source_chat_id:
+        chat_info = fetch_chat_info(source_chat_id) if not channel_title else None
+        upsert_channel(
+            source_chat_id,
+            title=channel_title or (chat_info or {}).get("title", ""),
+            avatar_url=channel_avatar_url or (chat_info or {}).get("avatar_url", ""),
+        )
+        channel = get_channel_info(source_chat_id)
+        if channel and channel.get("is_blocked"):
+            return jsonify({"error": "Канал заблокирован"}), 403
+
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT chat_id, title, avatar_url, is_blocked, created_at, updated_at FROM channels WHERE chat_id = ?",
+        (normalized_chat_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "chat_id": row["chat_id"],
+        "title": row["title"] or "",
+        "avatar_url": row["avatar_url"] or "",
+        "is_blocked": bool(row["is_blocked"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def upsert_channel(chat_id: str, title: str = "", avatar_url: str = "", is_blocked: int | None = None):
+    normalized_chat_id = str(chat_id or "").strip()[:256]
+    if not normalized_chat_id:
+        return
+    existing = get_channel_info(normalized_chat_id)
+    now = datetime.now(timezone.utc).isoformat()
+    final_blocked = int(existing["is_blocked"]) if existing and is_blocked is None else int(1 if is_blocked else 0)
+    conn = get_db_connection()
+    conn.execute(
+        """
+        INSERT INTO channels (chat_id, title, avatar_url, is_blocked, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET
+            title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE channels.title END,
+            avatar_url = CASE WHEN excluded.avatar_url <> '' THEN excluded.avatar_url ELSE channels.avatar_url END,
+            is_blocked = excluded.is_blocked,
+            updated_at = excluded.updated_at
+        """,
+        (
+            normalized_chat_id,
+            (title or "").strip()[:255],
+            (avatar_url or "").strip()[:1000],
+            final_blocked,
+            existing["created_at"] if existing else now,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_channels() -> list[dict]:
+    conn = get_db_connection()
+    rows = conn.execute(
+        """
+        SELECT channels.chat_id, channels.title, channels.avatar_url, channels.is_blocked, channels.created_at, channels.updated_at,
+               COUNT(posts.post_id) AS posts_count
+        FROM channels
+        LEFT JOIN posts ON posts.source_chat_id = channels.chat_id
+        GROUP BY channels.chat_id, channels.title, channels.avatar_url, channels.is_blocked, channels.created_at, channels.updated_at
+        ORDER BY channels.updated_at DESC, channels.chat_id DESC
+        """
+    ).fetchall()
+    conn.close()
+    return [
+        {
+            "chat_id": row["chat_id"],
+            "title": row["title"] or row["chat_id"],
+            "avatar_url": row["avatar_url"] or "",
+            "is_blocked": bool(row["is_blocked"]),
+            "posts_count": int(row["posts_count"] or 0),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
+def set_channel_block(chat_id: str, is_blocked: bool):
+    channel = get_channel_info(chat_id)
+    if not channel:
+        upsert_channel(chat_id, title="", avatar_url="", is_blocked=1 if is_blocked else 0)
+    else:
+        upsert_channel(chat_id, title=channel["title"], avatar_url=channel["avatar_url"], is_blocked=1 if is_blocked else 0)
 
 
 def upsert_user_settings(user: dict, notifications_enabled: int | None = None, consent_accepted: int | None = None):
@@ -914,6 +1052,29 @@ def is_chat_admin(chat_id: str, user_id: str) -> bool:
     return str(user_id) in get_chat_admin_ids(chat_id)
 
 
+def fetch_chat_info(chat_id: str) -> dict | None:
+    normalized_chat_id = str(chat_id or "").strip()
+    if not BOT_TOKEN or not normalized_chat_id:
+        return None
+    try:
+        req = Request(
+            url=f"https://platform-api.max.ru/chats/{quote(normalized_chat_id, safe='')}",
+            headers={"Authorization": BOT_TOKEN},
+            method="GET",
+        )
+        with urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if not isinstance(data, dict):
+            return None
+        return {
+            "chat_id": normalized_chat_id,
+            "title": (data.get("title") or data.get("name") or data.get("display_name") or "").strip()[:255],
+            "avatar_url": (data.get("avatar_url") or data.get("full_avatar_url") or "").strip()[:1000],
+        }
+    except Exception:
+        return None
+
+
 def user_can_moderate_comment(user_id: str, post_id: str) -> bool:
     post = get_post_info(post_id)
     if not post:
@@ -963,6 +1124,54 @@ def send_reply_notification(target_user_id: str, actor_name: str, actor_comment:
             response.read()
     except Exception as error:
         print(f"Не удалось отправить уведомление пользователю {target_user_id[:32]}: {error}")
+
+
+def send_channel_admin_notifications(post_id: str, actor_user_id: str, actor_name: str, actor_comment: str):
+    post = get_post_info(post_id)
+    source_chat_id = str((post or {}).get("source_chat_id") or "").strip()
+    if not source_chat_id or not BOT_TOKEN:
+        return
+
+    channel = get_channel_info(source_chat_id) or {}
+    channel_title = channel.get("title") or source_chat_id
+    preview = (actor_comment or "").strip() or "Фото/видео"
+    text = f"Новый комментарий в канале «{channel_title}».\n\n{actor_name}: {preview[:300]}"
+    payload = {
+        "text": text,
+        "notify": True,
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {
+                    "buttons": [[
+                        {
+                            "type": "link",
+                            "text": "Открыть комментарии",
+                            "url": f"https://max.ru/{BOT_USERNAME}?startapp={post_id}",
+                        }
+                    ]]
+                }
+            }
+        ],
+    }
+
+    for admin_id in get_chat_admin_ids(source_chat_id):
+        if str(admin_id) == str(actor_user_id):
+            continue
+        try:
+            req = Request(
+                url=f"https://platform-api.max.ru/messages?chat_id={quote(str(admin_id), safe='')}",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": BOT_TOKEN
+                },
+                method="POST",
+            )
+            with urlopen(req, timeout=10) as response:
+                response.read()
+        except Exception as error:
+            print(f"Не удалось отправить админ-уведомление {str(admin_id)[:32]}: {error}")
 
 
 def refresh_post_button(post_id: str):
@@ -1505,6 +1714,20 @@ HTML_TEMPLATE = """
             font-size: 11px;
         }
 
+        .author-badge {
+            display: inline-flex;
+            align-items: center;
+            margin-left: 6px;
+            padding: 2px 6px;
+            border-radius: 999px;
+            background: rgba(46, 166, 255, 0.14);
+            color: #8fd1ff;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            vertical-align: middle;
+        }
+
         .empty {
             align-self: center;
             margin-top: 28px;
@@ -1667,8 +1890,28 @@ HTML_TEMPLATE = """
             margin-top: 4px;
             display: flex;
             align-items: center;
-            justify-content: flex-end;
+            justify-content: space-between;
             gap: 10px;
+        }
+
+        .channel-toggle {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: #cfe5fb;
+            background: rgba(34, 49, 64, 0.82);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 999px;
+            padding: 6px 10px;
+        }
+
+        .channel-toggle.show {
+            display: inline-flex;
+        }
+
+        .channel-toggle input {
+            accent-color: #2ea6ff;
         }
 
         .status {
@@ -1872,6 +2115,10 @@ HTML_TEMPLATE = """
                 </button>
             </div>
             <div class="composer-actions">
+                <label class="channel-toggle" id="channelToggleWrap">
+                    <input id="postAsChannel" type="checkbox">
+                    <span id="channelToggleText">От имени канала</span>
+                </label>
                 <div class="status" id="status"></div>
             </div>
         </div>
@@ -1932,6 +2179,9 @@ HTML_TEMPLATE = """
         const previewVideoShell = document.getElementById("previewVideoShell");
         const removeImageBtn = document.getElementById("removeImageBtn");
         const editImageBtn = document.getElementById("editImageBtn");
+        const channelToggleWrap = document.getElementById("channelToggleWrap");
+        const channelToggleText = document.getElementById("channelToggleText");
+        const postAsChannel = document.getElementById("postAsChannel");
         const postCard = document.getElementById("postCard");
         const postCardText = document.getElementById("postCardText");
         const replyBox = document.getElementById("replyBox");
@@ -2029,6 +2279,19 @@ HTML_TEMPLATE = """
             const enabled = Boolean(notificationSettings && notificationSettings.notifications_enabled);
             notifyToggle.classList.toggle("active", enabled);
             notifyToggle.title = enabled ? "Уведомления включены" : "Уведомления выключены";
+        }
+
+        function updateChannelToggle(postInfo) {
+            const canPostAsChannel = Boolean(postInfo && postInfo.viewer_can_post_as_channel);
+            if (!channelToggleWrap || !postAsChannel) return;
+            channelToggleWrap.classList.toggle("show", canPostAsChannel);
+            if (!canPostAsChannel) {
+                postAsChannel.checked = false;
+                channelToggleText.textContent = "От имени канала";
+                return;
+            }
+            const channelTitle = String(postInfo && postInfo.channel_title ? postInfo.channel_title : "канала");
+            channelToggleText.textContent = `От имени: ${channelTitle}`;
         }
 
         function buildCommentsSignature(comments) {
@@ -2482,6 +2745,7 @@ function setPreviewFromFile(file) {
             const normalizedMediaType = normalizeMediaType(comment.media_type, mediaUrl);
             const profileAction = comment.public_username ? `onclick="openProfileLink('${escapeHtml(comment.public_username)}')"` : "";
             const avatarUrl = comment.avatar_url ? encodeURI(comment.avatar_url) : "";
+            const authorBadge = comment.author_type === "channel" ? '<span class="author-badge">канал</span>' : "";
             const avatarHtml = avatarUrl
                 ? `<div class="avatar" ${profileAction}><img src="${avatarUrl}" alt="${escapeHtml(comment.username)}" loading="lazy" onerror="this.style.display='none'; this.parentElement.textContent='${initial}'"></div>`
                 : `<div class="avatar" ${profileAction}>${initial}</div>`;
@@ -2497,7 +2761,7 @@ function setPreviewFromFile(file) {
                     <div class="message-row ${mine ? "mine" : ""}">
                         ${mine ? "" : avatarHtml}
                         <div class="bubble" data-comment-id="${comment.id}">
-                            <div class="message-name" ${profileAction}>${escapeHtml(comment.username)}</div>
+                            <div class="message-name" ${profileAction}>${escapeHtml(comment.username)} ${authorBadge}</div>
                             ${parentPreview}
                             <div class="message-text">${escapeHtml(comment.comment)}</div>
                             ${mediaHtml}
@@ -2550,6 +2814,7 @@ function setPreviewFromFile(file) {
                     postCard.hidden = true;
                     lastRenderedPostText = "";
                 }
+                updateChannelToggle(data.post || {});
                 renderComments(data.comments || []);
                 bindContextHandlers();
             } catch (error) {
@@ -2591,6 +2856,7 @@ function setPreviewFromFile(file) {
                     formData.append("post_id", postId);
                     formData.append("comment", comment);
                     formData.append("init_data", initData);
+                    if (postAsChannel && postAsChannel.checked) formData.append("post_as_channel", "1");
                     if (replyToCommentId) formData.append("parent_id", String(replyToCommentId));
                     if (selectedImage) formData.append("image", selectedImage);
                     response = await fetch("/api/comment", { method: "POST", body: formData });
@@ -2975,11 +3241,23 @@ def register_post():
     counter_enabled = 1 if payload.get("counter_enabled", True) else 0
     post_text = (payload.get("post_text") or "").strip()[:4000]
     message_text = (payload.get("message_text") or "").strip()[:4000]
+    channel_title = (payload.get("channel_title") or "").strip()[:255]
+    channel_avatar_url = (payload.get("channel_avatar_url") or "").strip()[:1000]
     attachments_json = payload.get("attachments") or []
     if not isinstance(attachments_json, list):
         attachments_json = []
     if not post_id:
         return jsonify({"error": "Не переданы данные поста"}), 400
+    if source_chat_id:
+        chat_info = fetch_chat_info(source_chat_id) if not channel_title else None
+        upsert_channel(
+            source_chat_id,
+            title=channel_title or (chat_info or {}).get("title", ""),
+            avatar_url=channel_avatar_url or (chat_info or {}).get("avatar_url", ""),
+        )
+        channel = get_channel_info(source_chat_id)
+        if channel and channel.get("is_blocked"):
+            return jsonify({"error": "Канал заблокирован"}), 403
 
     conn = get_db_connection()
     conn.execute(
@@ -3018,7 +3296,7 @@ def get_comments_by_post(post_id):
     conn = get_db_connection()
     rows = conn.execute(
         """
-        SELECT comments.id, comments.post_id, comments.user_id, comments.username, comments.comment, comments.image_path, comments.media_path, comments.media_type, comments.parent_id, comments.edited_at, comments.created_at
+        SELECT comments.id, comments.post_id, comments.user_id, comments.username, comments.author_type, comments.channel_chat_id, comments.comment, comments.image_path, comments.media_path, comments.media_type, comments.parent_id, comments.edited_at, comments.created_at
         , COALESCE(comments.public_username, user_settings.public_username) AS public_username
         , COALESCE(comments.avatar_url, user_settings.avatar_url) AS avatar_url
         FROM comments
@@ -3038,7 +3316,9 @@ def get_comments_by_post(post_id):
         comment["can_edit"] = is_owner
         comment["can_delete"] = is_owner or viewer_is_admin
         comments.append(comment)
-    return jsonify({"post_id": normalized_post_id, "post": get_post_info(normalized_post_id), "comments": comments})
+    post_info = get_post_info(normalized_post_id) or {}
+    post_info["viewer_can_post_as_channel"] = bool(viewer_is_admin and post_info.get("source_chat_id"))
+    return jsonify({"post_id": normalized_post_id, "post": post_info, "comments": comments})
 
 
 @app.route("/api/post_count/<path:post_id>")
@@ -3058,6 +3338,7 @@ def add_comment():
     post_id = normalize_post_id(payload.get("post_id"))
     comment = normalize_comment(payload.get("comment"))
     parent_id = payload.get("parent_id")
+    post_as_channel = str(payload.get("post_as_channel") or "").strip().lower() in {"1", "true", "yes", "on"}
     verified_user = validate_max_init_data(payload.get("init_data", ""))
 
     if not post_id:
@@ -3071,6 +3352,26 @@ def add_comment():
     if not comment and not media_path:
         return jsonify({"error": "Комментарий пустой"}), 400
 
+    post = get_post_info(post_id)
+    if not post:
+        return jsonify({"error": "Пост не найден"}), 404
+    source_chat_id = str(post.get("source_chat_id") or "").strip()
+    channel = get_channel_info(source_chat_id) if source_chat_id else None
+    if channel and channel.get("is_blocked"):
+        return jsonify({"error": "Канал заблокирован"}), 403
+    author_type = "channel" if post_as_channel else "user"
+    author_name = verified_user["username"]
+    author_public_username = verified_user.get("public_username", "")
+    author_avatar_url = verified_user.get("avatar_url", "")
+    channel_chat_id = None
+    if post_as_channel:
+        if not source_chat_id or not user_can_moderate_comment(verified_user["user_id"], post_id):
+            return jsonify({"error": "Писать от имени канала может только администратор"}), 403
+        author_name = (channel or {}).get("title") or "Канал"
+        author_public_username = ""
+        author_avatar_url = (channel or {}).get("avatar_url", "")
+        channel_chat_id = source_chat_id
+
     normalized_parent_id = int(parent_id) if str(parent_id or "").isdigit() else None
     created_at = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection()
@@ -3083,15 +3384,17 @@ def add_comment():
         ).fetchone()
     cursor.execute(
         """
-        INSERT INTO comments (post_id, user_id, username, public_username, avatar_url, comment, image_path, media_path, media_type, parent_id, edited_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO comments (post_id, user_id, username, author_type, channel_chat_id, public_username, avatar_url, comment, image_path, media_path, media_type, parent_id, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             post_id,
             verified_user["user_id"],
-            verified_user["username"],
-            verified_user.get("public_username", ""),
-            verified_user.get("avatar_url", ""),
+            author_name,
+            author_type,
+            channel_chat_id,
+            author_public_username,
+            author_avatar_url,
             comment,
             media_path,
             media_path,
@@ -3112,7 +3415,8 @@ def add_comment():
     if parent_comment and parent_comment["user_id"] != verified_user["user_id"]:
         target_settings = get_user_settings(parent_comment["user_id"])
         if target_settings.get("notifications_enabled"):
-            send_reply_notification(parent_comment["user_id"], verified_user["username"], comment, post_id)
+            send_reply_notification(parent_comment["user_id"], author_name, comment, post_id)
+    send_channel_admin_notifications(post_id, verified_user["user_id"], author_name, comment)
 
     return jsonify({"status": "success", "comment": {"id": comment_id}})
 
@@ -3238,6 +3542,27 @@ def export_known_chats():
     ).fetchall()
     conn.close()
     return jsonify({"chat_ids": [str(row["source_chat_id"]) for row in rows]})
+
+
+@app.route("/api/admin/channels")
+def admin_channels():
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    return jsonify({"channels": list_channels()})
+
+
+@app.route("/api/admin/channels/<path:chat_id>/block", methods=["POST"])
+def admin_block_channel(chat_id):
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    payload = request.get_json(silent=True) or {}
+    is_blocked = bool(payload.get("blocked", True))
+    channel_info = fetch_chat_info(chat_id) or {}
+    upsert_channel(chat_id, title=channel_info.get("title", ""), avatar_url=channel_info.get("avatar_url", ""), is_blocked=1 if is_blocked else 0)
+    sync_store_db("channel-block")
+    update_store_archive("channel-block")
+    create_backup("channel-block")
+    return jsonify({"status": "success", "channel": get_channel_info(chat_id)})
 
 
 @app.route("/health")
