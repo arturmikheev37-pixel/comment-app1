@@ -3618,6 +3618,14 @@ def admin_channels():
     return jsonify({"channels": list_channels()})
 
 
+@app.route("/api/admin/post/<path:post_id>")
+def admin_post_lookup(post_id):
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    resolved_post_id = resolve_post_id(post_id)
+    return jsonify({"post": get_post_info(resolved_post_id) if resolved_post_id else None})
+
+
 @app.route("/api/admin/channels/<path:chat_id>/block", methods=["POST"])
 def admin_block_channel(chat_id):
     if not require_sync_secret():
