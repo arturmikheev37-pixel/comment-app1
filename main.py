@@ -3276,9 +3276,10 @@ restore_store_db_if_needed()
 restore_store_archive_if_needed()
 restore_latest_backup_if_needed()
 init_db()
-sync_store_db("startup")
-update_store_archive("startup")
-create_backup("startup")
+if count_comments_in_db(DB_PATH) > 0:
+    sync_store_db("startup")
+    update_store_archive("startup")
+    create_backup("startup")
 
 
 if __name__ == "__main__":
