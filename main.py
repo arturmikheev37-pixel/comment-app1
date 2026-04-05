@@ -3980,8 +3980,6 @@ def register_post():
     message_text = (payload.get("message_text") or "").strip()[:4000]
     channel_title = (payload.get("channel_title") or "").strip()[:255]
     channel_avatar_url = (payload.get("channel_avatar_url") or "").strip()[:1000]
-    owner_user_id = str(payload.get("owner_user_id") or "").strip()[:128]
-    owner_username = (payload.get("owner_username") or "").strip()[:255]
     attachments_json = payload.get("attachments") or []
     if not isinstance(attachments_json, list):
         attachments_json = []
@@ -3993,8 +3991,6 @@ def register_post():
             source_chat_id,
             title=channel_title or (chat_info or {}).get("title", ""),
             avatar_url=channel_avatar_url or (chat_info or {}).get("avatar_url", ""),
-            owner_user_id=owner_user_id,
-            owner_username=owner_username,
         )
         channel = get_channel_info(source_chat_id)
         if channel and channel.get("is_blocked"):
@@ -4305,9 +4301,7 @@ def export_known_chats():
 def admin_channels():
     if not require_sync_secret():
         return jsonify({"error": "forbidden"}), 403
-    owner_user_id = str(request.args.get("owner_user_id") or "").strip()
-    include_deleted = str(request.args.get("include_deleted") or "").strip().lower() in {"1", "true", "yes", "on"}
-    return jsonify({"channels": list_channels(owner_user_id=owner_user_id or None, include_deleted=include_deleted)})
+    return jsonify({"channels": list_channels()})
 
 
 @app.route("/api/admin/stats")
@@ -4316,8 +4310,7 @@ def admin_stats():
         return jsonify({"error": "forbidden"}), 403
     chat_id = str(request.args.get("chat_id") or "").strip()
     period = normalize_stats_period(request.args.get("period"))
-    owner_user_id = str(request.args.get("owner_user_id") or "").strip()
-    return jsonify(get_channel_stats(chat_id=chat_id or None, period=period, owner_user_id=owner_user_id or None))
+    return jsonify(get_channel_stats(chat_id=chat_id or None, period=period))
 
 
 @app.route("/api/admin/post/<path:post_id>")
@@ -4341,18 +4334,12 @@ def admin_block_channel(chat_id):
         return jsonify({"error": "forbidden"}), 403
     payload = request.get_json(silent=True) or {}
     is_blocked = bool(payload.get("blocked", True))
-    is_deleted = bool(payload.get("deleted", False))
-    owner_user_id = str(payload.get("owner_user_id") or "").strip()[:128]
-    owner_username = (payload.get("owner_username") or "").strip()[:255]
     channel_info = fetch_chat_info(chat_id) or {}
     upsert_channel(
         chat_id,
         title=channel_info.get("title", ""),
         avatar_url=channel_info.get("avatar_url", ""),
-        owner_user_id=owner_user_id,
-        owner_username=owner_username,
         is_blocked=1 if is_blocked else 0,
-        is_deleted=1 if is_deleted else 0,
     )
     sync_store_db("channel-block")
     update_store_archive("channel-block")
