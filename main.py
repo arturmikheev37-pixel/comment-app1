@@ -1032,6 +1032,11 @@ def list_recent_posts(chat_id: str = "", limit: int = 10) -> list[dict]:
         FROM posts
         LEFT JOIN channels ON channels.chat_id = posts.source_chat_id
         WHERE (? = '' OR posts.source_chat_id = ?)
+          AND TRIM(COALESCE(posts.source_chat_id, '')) <> ''
+          AND NOT (
+              TRIM(COALESCE(posts.message_text, '')) LIKE '/%'
+              AND TRIM(COALESCE(posts.attachments_json, '[]')) IN ('[]', '')
+          )
         ORDER BY posts.created_at DESC, posts.source_post_id DESC
         LIMIT ?
         """,
