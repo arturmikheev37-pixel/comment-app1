@@ -1020,6 +1020,42 @@ def list_channels() -> list[dict]:
     ]
 
 
+def list_recent_posts(chat_id: str = "", limit: int = 10) -> list[dict]:
+    normalized_chat_id = str(chat_id or "").strip()
+    safe_limit = max(1, min(int(limit or 10), 30))
+    conn = get_db_connection()
+    rows = conn.execute(
+        """
+        SELECT posts.post_id, posts.source_post_id, posts.source_chat_id, posts.button_message_id,
+               posts.counter_enabled, posts.post_text, posts.message_text, posts.attachments_json, posts.created_at,
+               channels.title AS channel_title, channels.avatar_url AS channel_avatar_url
+        FROM posts
+        LEFT JOIN channels ON channels.chat_id = posts.source_chat_id
+        WHERE (? = '' OR posts.source_chat_id = ?)
+        ORDER BY posts.created_at DESC, posts.source_post_id DESC
+        LIMIT ?
+        """,
+        (normalized_chat_id, normalized_chat_id, safe_limit),
+    ).fetchall()
+    conn.close()
+    return [
+        {
+            "post_id": row["post_id"],
+            "source_post_id": row["source_post_id"] or "",
+            "source_chat_id": row["source_chat_id"] or "",
+            "button_message_id": row["button_message_id"] or "",
+            "counter_enabled": bool(row["counter_enabled"]),
+            "post_text": row["post_text"] or "",
+            "message_text": row["message_text"] or "",
+            "attachments_json": row["attachments_json"] or "[]",
+            "created_at": row["created_at"] or "",
+            "channel_title": row["channel_title"] or row["source_chat_id"] or "",
+            "channel_avatar_url": row["channel_avatar_url"] or "",
+        }
+        for row in rows
+    ]
+
+
 def set_channel_block(chat_id: str, is_blocked: bool):
     channel = get_channel_info(chat_id)
     if not channel:
@@ -3748,6 +3784,18 @@ def admin_channels():
     if not require_sync_secret():
         return jsonify({"error": "forbidden"}), 403
     return jsonify({"channels": list_channels()})
+
+
+@app.route("/api/admin/posts")
+def admin_posts():
+    if not require_sync_secret():
+        return jsonify({"error": "forbidden"}), 403
+    chat_id = str(request.args.get("chat_id") or "").strip()
+    try:
+        limit = int(request.args.get("limit", 10))
+    except (TypeError, ValueError):
+        limit = 10
+    return jsonify({"posts": list_recent_posts(chat_id=chat_id, limit=limit)})
 
 
 @app.route("/api/admin/post/<path:post_id>")
