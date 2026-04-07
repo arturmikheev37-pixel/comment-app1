@@ -924,8 +924,8 @@ def ensure_post_record(post_id: str, source_post_id: str | None = None) -> dict 
     conn = get_db_connection()
     conn.execute(
         """
-        INSERT OR IGNORE INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, message_format, attachments_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             placeholder["post_id"],
@@ -935,6 +935,7 @@ def ensure_post_record(post_id: str, source_post_id: str | None = None) -> dict 
             placeholder["counter_enabled"],
             placeholder["post_text"],
             placeholder["message_text"],
+            placeholder["message_format"],
             placeholder["attachments_json"],
             datetime.now(timezone.utc).isoformat(),
         ),
@@ -3492,23 +3493,57 @@ def register_post():
         if channel and channel.get("is_blocked"):
             return jsonify({"error": "Канал заблокирован"}), 403
 
-    conn = get_db_connection()
-    conn.execute(
-        """
-        INSERT INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, message_format, attachments_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(post_id) DO UPDATE SET
-            source_post_id = excluded.source_post_id,
-            source_chat_id = excluded.source_chat_id,
-            button_message_id = excluded.button_message_id,
-            counter_enabled = excluded.counter_enabled,
-            post_text = excluded.post_text,
-            message_text = excluded.message_text,
-            message_format = excluded.message_format,
-            attachments_json = excluded.attachments_json
-        """,
-        (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, message_format, json.dumps(attachments_json, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
+    params = (
+        post_id,
+        source_post_id,
+        source_chat_id,
+        button_message_id,
+        counter_enabled,
+        post_text,
+        message_text,
+        message_format,
+        json.dumps(attachments_json, ensure_ascii=False),
+        datetime.now(timezone.utc).isoformat(),
     )
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, message_format, attachments_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(post_id) DO UPDATE SET
+                source_post_id = excluded.source_post_id,
+                source_chat_id = excluded.source_chat_id,
+                button_message_id = excluded.button_message_id,
+                counter_enabled = excluded.counter_enabled,
+                post_text = excluded.post_text,
+                message_text = excluded.message_text,
+                message_format = excluded.message_format,
+                attachments_json = excluded.attachments_json
+            """,
+            params,
+        )
+    except sqlite3.OperationalError as error:
+        if "message_format" not in str(error).lower():
+            conn.close()
+            raise
+        conn.execute("ALTER TABLE posts ADD COLUMN message_format TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            """
+            INSERT INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, message_format, attachments_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(post_id) DO UPDATE SET
+                source_post_id = excluded.source_post_id,
+                source_chat_id = excluded.source_chat_id,
+                button_message_id = excluded.button_message_id,
+                counter_enabled = excluded.counter_enabled,
+                post_text = excluded.post_text,
+                message_text = excluded.message_text,
+                message_format = excluded.message_format,
+                attachments_json = excluded.attachments_json
+            """,
+            params,
+        )
     conn.commit()
     conn.close()
     sync_store_db("post-upsert")
