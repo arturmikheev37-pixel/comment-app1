@@ -161,6 +161,7 @@ def init_db():
             counter_enabled INTEGER NOT NULL DEFAULT 1,
             post_text TEXT NOT NULL DEFAULT '',
             message_text TEXT NOT NULL DEFAULT '',
+            message_format TEXT NOT NULL DEFAULT '',
             attachments_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL DEFAULT ''
         )
@@ -283,6 +284,8 @@ def init_db():
         cursor.execute("ALTER TABLE posts ADD COLUMN post_text TEXT NOT NULL DEFAULT ''")
     if "message_text" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN message_text TEXT NOT NULL DEFAULT ''")
+    if "message_format" not in post_columns:
+        cursor.execute("ALTER TABLE posts ADD COLUMN message_format TEXT NOT NULL DEFAULT ''")
     if "attachments_json" not in post_columns:
         cursor.execute("ALTER TABLE posts ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
     if "created_at" not in post_columns:
@@ -837,12 +840,12 @@ def serialize_comment(row: sqlite3.Row, comment_lookup: dict | None = None) -> d
 def get_post_info(post_id: str) -> dict | None:
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at FROM posts WHERE post_id = ?",
+        "SELECT post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, message_format, attachments_json, created_at FROM posts WHERE post_id = ?",
         (post_id,),
     ).fetchone()
     if not row:
         row = conn.execute(
-            "SELECT post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at FROM posts WHERE source_post_id = ?",
+            "SELECT post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, message_format, attachments_json, created_at FROM posts WHERE source_post_id = ?",
             (post_id,),
         ).fetchone()
     conn.close()
@@ -857,6 +860,7 @@ def get_post_info(post_id: str) -> dict | None:
         "counter_enabled": row["counter_enabled"],
         "post_text": row["post_text"],
         "message_text": row["message_text"],
+        "message_format": row["message_format"] or "",
         "attachments_json": row["attachments_json"],
         "created_at": row["created_at"],
         "channel_title": (channel or {}).get("title", ""),
@@ -879,6 +883,7 @@ def build_placeholder_post_info(post_id: str, source_post_id: str | None = None)
         "counter_enabled": 0,
         "post_text": "",
         "message_text": "",
+        "message_format": "",
         "attachments_json": "[]",
         "created_at": "",
         "channel_title": "",
@@ -1027,7 +1032,7 @@ def list_recent_posts(chat_id: str = "", limit: int = 10) -> list[dict]:
     rows = conn.execute(
         """
         SELECT posts.post_id, posts.source_post_id, posts.source_chat_id, posts.button_message_id,
-               posts.counter_enabled, posts.post_text, posts.message_text, posts.attachments_json, posts.created_at,
+               posts.counter_enabled, posts.post_text, posts.message_text, posts.message_format, posts.attachments_json, posts.created_at,
                channels.title AS channel_title, channels.avatar_url AS channel_avatar_url
         FROM posts
         LEFT JOIN channels ON channels.chat_id = posts.source_chat_id
@@ -1052,6 +1057,7 @@ def list_recent_posts(chat_id: str = "", limit: int = 10) -> list[dict]:
             "counter_enabled": bool(row["counter_enabled"]),
             "post_text": row["post_text"] or "",
             "message_text": row["message_text"] or "",
+            "message_format": row["message_format"] or "",
             "attachments_json": row["attachments_json"] or "[]",
             "created_at": row["created_at"] or "",
             "channel_title": row["channel_title"] or row["source_chat_id"] or "",
@@ -1431,6 +1437,8 @@ def refresh_post_button(post_id: str):
         "notify": True,
         "attachments": attachments,
     }
+    if str(post.get("message_format") or "").strip():
+        payload["format"] = str(post.get("message_format") or "").strip()
 
     # ИСПРАВЛЕНО: убран access_token из URL, message_id перенесён в путь, добавлен заголовок Authorization
     try:
@@ -3465,6 +3473,7 @@ def register_post():
     counter_enabled = 1 if payload.get("counter_enabled", True) else 0
     post_text = (payload.get("post_text") or "").strip()[:4000]
     message_text = (payload.get("message_text") or "").strip()[:4000]
+    message_format = (payload.get("message_format") or "").strip()[:32]
     channel_title = (payload.get("channel_title") or "").strip()[:255]
     channel_avatar_url = (payload.get("channel_avatar_url") or "").strip()[:1000]
     attachments_json = payload.get("attachments") or []
@@ -3486,8 +3495,8 @@ def register_post():
     conn = get_db_connection()
     conn.execute(
         """
-        INSERT INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, attachments_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO posts (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, message_format, attachments_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(post_id) DO UPDATE SET
             source_post_id = excluded.source_post_id,
             source_chat_id = excluded.source_chat_id,
@@ -3495,9 +3504,10 @@ def register_post():
             counter_enabled = excluded.counter_enabled,
             post_text = excluded.post_text,
             message_text = excluded.message_text,
+            message_format = excluded.message_format,
             attachments_json = excluded.attachments_json
         """,
-        (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, json.dumps(attachments_json, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
+        (post_id, source_post_id, source_chat_id, button_message_id, counter_enabled, post_text, message_text, message_format, json.dumps(attachments_json, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     conn.close()
