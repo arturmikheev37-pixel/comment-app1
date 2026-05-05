@@ -1434,12 +1434,9 @@ def refresh_post_button(post_id: str):
     )
 
     payload = {
-        "text": post.get("message_text", ""),
         "notify": True,
         "attachments": attachments,
     }
-    if str(post.get("message_format") or "").strip():
-        payload["format"] = str(post.get("message_format") or "").strip()
 
     # ИСПРАВЛЕНО: убран access_token из URL, message_id перенесён в путь, добавлен заголовок Authorization
     try:
@@ -1455,6 +1452,28 @@ def refresh_post_button(post_id: str):
         with urlopen(req, timeout=10) as response:
             response.read()
     except Exception as error:
+        fallback_payload = {
+            "text": post.get("message_text", ""),
+            "notify": True,
+            "attachments": attachments,
+        }
+        if str(post.get("message_format") or "").strip():
+            fallback_payload["format"] = str(post.get("message_format") or "").strip()
+        try:
+            req = Request(
+                url=f"https://platform-api.max.ru/messages?message_id={quote(str(target_message_id), safe='')}",
+                data=json.dumps(fallback_payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": BOT_TOKEN
+                },
+                method="PUT",
+            )
+            with urlopen(req, timeout=10) as response:
+                response.read()
+            return
+        except Exception:
+            pass
         if isinstance(error, HTTPError):
             try:
                 details = error.read().decode("utf-8", errors="replace")[:400]
